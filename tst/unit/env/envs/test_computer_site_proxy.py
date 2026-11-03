@@ -10,12 +10,14 @@ import contextlib
 import email.message
 import io
 import json
+import os
 import socket
 import ssl
 import struct
 import urllib.error
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import uvicorn
@@ -610,6 +612,51 @@ def test_a_wildcard_name_starts_dns_even_when_resolv_conf_names_no_other_nameser
     (config,) = started
     assert (config.dns_port, config.nameservers) == (53, [])
     assert (root / "etc/resolv.conf").read_text() == "nameserver 127.0.0.1\n"
+
+
+def test_the_proxy_serves_as_nobody_where_the_base_has_it_else_as_the_session_user(tmp_path, monkeypatch):
+    monkeypatch.setattr(site_proxy.pwd, "getpwnam", lambda name: SimpleNamespace(pw_name=name))
+    assert site_proxy.serve_user("agent") == "nobody"
+
+    def missing(name):
+        raise KeyError(name)
+
+    monkeypatch.setattr(site_proxy.pwd, "getpwnam", missing)
+    assert site_proxy.serve_user("agent") == "agent"
+    serve_path = tmp_path / "serve.json"
+    serve_path.write_text(json.dumps({"user": "agent", "serve_user": "nobody", "sites": []}))
+    assert (Config.load(str(serve_path)).user, Config.load(str(serve_path)).serve_user) == ("agent", "nobody")
+
+
+def test_keep_starts_serve_again_each_time_it_ends(monkeypatch):
+    runs = []
+
+    def run(argv, **kwargs):
+        runs.append(argv[-2:])
+        return site_proxy.subprocess.CompletedProcess(argv, 1)
+
+    def sleep(seconds):
+        if len(runs) == 3:
+            raise StopIteration
+
+    monkeypatch.setattr(site_proxy.subprocess, "run", run)
+    monkeypatch.setattr(site_proxy.time, "sleep", sleep)
+    with pytest.raises(StopIteration):
+        site_proxy.keep("/etc/agentenv/sites/serve.json")
+
+    assert runs == [["serve", "/etc/agentenv/sites/serve.json"]] * 3
+
+
+def test_the_log_is_root_owned_beside_the_config_and_a_link_at_its_path_is_refused(tmp_path):
+    assert sites.proxy_config(sites.site_table([]), SimpleNamespace(ca_pem=None, leaves={}), user=None)["log"] == str(sites.FOLDER / "site-proxy.log")
+    target, log = tmp_path / "elsewhere", tmp_path / "site-proxy.log"
+    target.write_text("kept")
+    log.symlink_to(target)
+    with pytest.raises(OSError):
+        site_proxy.open_log(str(log))
+    assert target.read_text() == "kept"
+    os.close(site_proxy.open_log(str(tmp_path / "logs" / "fresh.log")))
+    assert (tmp_path / "logs" / "fresh.log").stat().st_mode & 0o777 == 0o600
 
 
 def test_the_proxy_is_standard_library_alone_so_the_bases_own_python_runs_it():

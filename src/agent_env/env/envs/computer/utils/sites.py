@@ -45,7 +45,7 @@ FOLDER = PurePosixPath("/etc/agentenv/sites")
 PROXY = FOLDER / "site_proxy.py"
 CONFIG = FOLDER / "config.json"
 CA_PATH = FOLDER / "ca.pem"
-LOG = "/var/log/agentenv/site-proxy.log"
+LOG = FOLDER / "site-proxy.log"
 SYNTHETIC, LIVE, ALLOWLIST = "synthetic", "live", "allowlist"
 RANKS = (SYNTHETIC, LIVE, ALLOWLIST)
 VALID_MARGIN = timedelta(days=1)
@@ -267,7 +267,7 @@ def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str]) -> di
         if route.site in issued.leaves:
             site["cert_pem"], site["key_pem"] = issued.leaves[route.site]
         sites.append(site)
-    return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": LOG}
+    return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG)}
 
 
 def reachable_problem(policy: Optional[NetworkPolicy], routes: list[Route]) -> Optional[str]:

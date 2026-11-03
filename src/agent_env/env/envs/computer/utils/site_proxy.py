@@ -7,7 +7,8 @@
 store, Firefox's policies, Chromium's managed policies and the session user's NSS databases, starts ``serve`` and checks, as the session user, that
 each name loads. ``serve`` listens on loopback: on 443 for a name served over HTTPS, on 80 to redirect those to HTTPS
 and to serve ``.localhost`` names over HTTP, and on 53 for DNS, over UDP and TCP, when a name is a wildcard, which a
-hosts file can't list; it then drops to the session user. The site sees itself at ``/`` under its own name: the path goes upstream under
+hosts file can't list; it then drops to ``SERVE_USER`` (``nobody``), else the session user, so the agent, which runs as
+the session user, can't stop it, and ``keep``, as root, starts it again should it end. The site sees itself at ``/`` under its own name: the path goes upstream under
 the route's prefix, ``X-Forwarded-Host`` and ``X-Forwarded-Proto`` say the name and scheme the browser used,
 ``AgentEnv-Site-Root`` has the gateway tell the site no prefix, so the links it makes are rooted at ``/`` too, and a
 ``Location`` or cookie naming the route is rewritten back to the name. Hop-by-hop headers and the browser's own
@@ -54,6 +55,8 @@ NAMESERVER_PORT = 53
 DATAGRAM_MAX = 65535
 LISTEN_TIMEOUT_S = 15.0
 CHECK_TIMEOUT_S = 15.0
+RESTART_DELAY_S = 1.0
+SERVE_USER = "nobody"
 FAILED = (("X-Agentenv-Site-Proxy", "failed"),)
 
 
@@ -110,11 +113,12 @@ class Site:
 
 @dataclass
 class Config:
-    """What ``serve`` reads: the session user it drops to, its ports, the sites and, with a wildcard name, the
-    nameservers it forwards every other question to."""
+    """What ``serve`` reads: the session user, the user it drops to (``serve_user``, else the session user), its
+    ports, the sites and, with a wildcard name, the nameservers it forwards every other question to."""
 
     user: Optional[str]
     sites: list[Site]
+    serve_user: Optional[str] = None
     listen: str = LOOPBACK
     https_port: int = 443
     http_port: int = 80
@@ -126,7 +130,8 @@ class Config:
         data = json.loads(Path(path).read_text())
         sites = [Site(name=s["name"], upstream=s["upstream"], domains=list(s["domains"]), cert=s.get("cert"),
                       key=s.get("key")) for s in data["sites"]]
-        return cls(user=data.get("user"), sites=sites, listen=data.get("listen", LOOPBACK),
+        return cls(user=data.get("user"), sites=sites, serve_user=data.get("serve_user"),
+                   listen=data.get("listen", LOOPBACK),
                    https_port=data.get("https_port", 443), http_port=data.get("http_port", 80),
                    dns_port=data.get("dns_port"), nameservers=list(data.get("nameservers") or []))
 
@@ -562,7 +567,7 @@ def tls_context(config: Config) -> Optional[ssl.SSLContext]:
 
 
 async def serve(config: Config) -> None:
-    """Listen, drop to the session user, and serve until cancelled."""
+    """Listen, drop to the user it serves as, and serve until cancelled."""
     proxy = SiteProxy(config)
     servers = []
     if (context := tls_context(config)) is not None:
@@ -576,12 +581,21 @@ async def serve(config: Config) -> None:
         transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
             lambda: resolver, local_addr=(config.listen, config.dns_port))
         servers.append(await asyncio.start_server(resolver.handle_stream, config.listen, config.dns_port))
-    drop_privileges(config.user)
+    drop_privileges(config.serve_user or config.user)
     try:
         await asyncio.gather(*(server.serve_forever() for server in servers))
     finally:
         if transport is not None:
             transport.close()
+
+
+def serve_user(session_user: Optional[str]) -> Optional[str]:
+    """The user ``serve`` drops to: ``SERVE_USER`` where the base has it, else the session user."""
+    try:
+        pwd.getpwnam(SERVE_USER)
+    except KeyError:
+        return session_user
+    return SERVE_USER
 
 
 def drop_privileges(user: Optional[str]) -> None:
@@ -771,7 +785,7 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
         write_in_place(paths.profile, f"export NODE_EXTRA_CA_CERTS={ca}\n"
                        + (f"export REQUESTS_CA_BUNDLE={bundle}\n" if bundle else ""))
         trust["environment"] = str(paths.profile)
-    serving = {"user": user, "sites": sites, **{key: given[key] for key in ("listen", "https_port", "http_port")
+    serving = {"user": user, "serve_user": serve_user(user), "sites": sites, **{key: given[key] for key in ("listen", "https_port", "http_port")
                                                  if key in given}}
     if wildcard:
         serving.update(dns_port=given.get("dns_port", 53), nameservers=nameservers)
@@ -782,12 +796,11 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
 
 
 def start(serve_path: str, log: Optional[str]) -> None:
-    """Start ``serve`` apart from this process, and wait until it listens."""
+    """Start ``keep``, which runs ``serve``, apart from this process, and wait until it listens. The log is opened
+    without following a link, so a link planted at its path can't have root write elsewhere."""
     config = Config.load(serve_path)
-    if log:
-        Path(log).parent.mkdir(parents=True, exist_ok=True)
-    output = open(log, "ab") if log else subprocess.DEVNULL
-    subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve", serve_path], stdin=subprocess.DEVNULL,
+    output = open_log(log) if log else subprocess.DEVNULL
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "keep", serve_path], stdin=subprocess.DEVNULL,
                      stdout=output, stderr=subprocess.STDOUT, start_new_session=True, close_fds=True)
     port = config.https_port if any(site.cert for site in config.sites) else config.http_port
     deadline = time.monotonic() + LISTEN_TIMEOUT_S
@@ -801,6 +814,21 @@ def start(serve_path: str, log: Optional[str]) -> None:
                 raise SystemExit(f"the site proxy didn't listen on {config.listen}:{port} within "
                                  f"{LISTEN_TIMEOUT_S:.0f} s: {tail}")
             time.sleep(0.2)
+
+
+def open_log(log: str) -> int:
+    Path(log).parent.mkdir(parents=True, exist_ok=True)
+    return os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+
+
+def keep(serve_path: str) -> None:
+    """As root: run ``serve`` on ``serve_path``, and start it again ``RESTART_DELAY_S`` after it ends, for as long as
+    this runs."""
+    while True:
+        ended = subprocess.run([sys.executable, os.path.abspath(__file__), "serve", serve_path],
+                               stdin=subprocess.DEVNULL).returncode
+        print(f"the site proxy ended ({ended}); starting it again", flush=True)
+        time.sleep(RESTART_DELAY_S)
 
 
 def checks_as(user: Optional[str], serve_path: str) -> dict:
@@ -841,12 +869,14 @@ def main(argv: list[str]) -> None:
     command, path = argv[0], argv[1]
     if command == "install":
         print(json.dumps(install(path)))
+    elif command == "keep":
+        keep(path)
     elif command == "serve":
         asyncio.run(serve(Config.load(path)))
     elif command == "check":
         print(json.dumps(check(Config.load(path))))
     else:
-        raise SystemExit(f"usage: site_proxy.py install|serve|check <config>, not {command!r}")
+        raise SystemExit(f"usage: site_proxy.py install|keep|serve|check <config>, not {command!r}")
 
 
 if __name__ == "__main__":

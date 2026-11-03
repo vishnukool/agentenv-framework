@@ -215,14 +215,14 @@ class Gateway:
         if self.website_urls:
             @self._mcp.custom_route(
                 "/website/{service_name}/{path:path}",
-                methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+                methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
             )
             async def proxy_to_frontend(request: Request) -> Response:
                 return await self._proxy_website_request(request)
 
             @self._mcp.custom_route(
                 "/website/{service_name}",
-                methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+                methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
             )
             async def proxy_to_frontend_root(request: Request) -> Response:
                 return await self._proxy_website_request(request)

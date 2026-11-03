@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
+from agentenv_protocol.computer.app import COMPUTER_APP
+from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
@@ -142,6 +144,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             await _require_display(record, values.get("resolution"))
             if params.site_routing:
                 record.metadata["computer"]["sites"] = await _route_sites(env, booted.sandbox, params, ttl_seconds)
+                await _launch_held_apps(env, record, booted.url)
         except BaseException:
             await discard(booted.sandbox)
             raise
@@ -173,6 +176,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         await _require_display(deployed, values.get("resolution"))
         if params.site_routing:
             record["sites"] = await _route_sites(env, sandbox, params, record["sites"]["valid_for_s"])
+            await _launch_held_apps(env, deployed, deployed.environment_url)
 
 
 async def _route_sites(env: ComputerEnv, sandbox: Sandbox, params: computer_params.ComputerParams,
@@ -182,6 +186,17 @@ async def _route_sites(env: ComputerEnv, sandbox: Sandbox, params: computer_para
     routed = await sites.route(sandbox, params.sites, user=env.computer.session.user, network=env.network,
                                valid_for=timedelta(seconds=valid_for_s), label=env.environment_name)
     return {**routed, "valid_for_s": valid_for_s}
+
+
+async def _launch_held_apps(env: ComputerEnv, record: DeployedSandboxEnv, url: str) -> None:
+    """Launch each app that starts with the computer, whose launch a deploy routing sites holds until the sites' names,
+    CA and proxy are in place, through its ``computer-app/v1`` ``launch``, then wait until the computer is ready."""
+    os_type = env.computer.os.type
+    held = [app for app in env.composed_apps() if (launch := app.launch(os_type)) is not None and launch.at == "boot"]
+    for app in held:
+        await record.invoke(COMPUTER_APP, "launch", environment_name=app.environment_name)
+    if held:
+        await ready(url, ready_timeout(env.composed_apps(), os_type), record.control_token)
 
 
 async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:
@@ -206,7 +221,8 @@ def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
     return {**settings_environment(computer, values, environment_name=env.environment_name,
                                    driver_settings=params.driver_settings),
             **app_settings_environment(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
-                                       env.computer.os.type)}
+                                       env.computer.os.type),
+            **({HOLD_BOOT_LAUNCH_ENV: "1"} if params.site_routing else {})}
 
 
 def _require_name(env: ComputerEnv, card: dict) -> None:

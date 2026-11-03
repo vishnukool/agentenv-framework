@@ -23,6 +23,8 @@ import httpx
 import pytest
 from agentenv_protocol import CONTROL_TOKEN_ENV
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
+from agentenv_protocol.computer.app import COMPUTER_APP
+from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI
 from click.testing import CliRunner
 
@@ -687,6 +689,7 @@ async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deploye
     assert [site.model_dump() for site in sites] == [{"name": "notes", "url": "http://localhost:8080/website/notes/",
                                                       "domains": ["notes.test"], "live": False, "allow_hosts": []}]
     assert options == {"user": "user", "network": None, "valid_for": timedelta(seconds=3600), "label": "desktop"}
+    assert boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV] == "1"
     record = context.deployed_envs[-1].metadata["computer"]
     assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM", "valid_for_s": 3600}
     assert record["env_params"]["site_routing"] is True and record["env_params"]["sites"][0]["name"] == "notes"
@@ -701,6 +704,34 @@ async def test_a_computer_without_site_routing_routes_nothing_whatever_websites_
     await DeployEnvTaskStep(id="d", version=None, env_id=env.id).execute(context)
 
     assert routes == [] and "sites" not in context.deployed_envs[-1].metadata["computer"]
+    assert HOLD_BOOT_LAUNCH_ENV not in boots.boots[0]["environment"]
+
+
+@pytest.mark.asyncio
+async def test_a_computer_routing_sites_launches_its_held_boot_apps_once_routed_then_waits_until_ready(monkeypatch):
+    order = []
+    apps = [SimpleNamespace(environment_name=name, launch=lambda os_type, at=at: SimpleNamespace(at=at))
+            for name, at in [("mail", "boot"), ("music", "demand"), ("notes", "boot")]]
+    env = SimpleNamespace(computer=SimpleNamespace(os=SimpleNamespace(type="linux")), composed_apps=lambda: apps)
+
+    async def invoke(uri, method, params=None, *, environment_name=None):
+        order.append((uri, method, environment_name))
+
+    async def ready(url, timeout, token):
+        order.append(("ready", url, token))
+        return {}
+
+    monkeypatch.setattr(env_computer_provider, "ready", ready)
+    monkeypatch.setattr(env_computer_provider, "ready_timeout", lambda apps, os_type: 30.0)
+    record = SimpleNamespace(invoke=invoke, control_token="t0ken")
+    await env_computer_provider._launch_held_apps(env, record, "http://computer")
+
+    assert order == [(COMPUTER_APP, "launch", "mail"), (COMPUTER_APP, "launch", "notes"),
+                     ("ready", "http://computer", "t0ken")]
+    order.clear()
+    apps[:] = [apps[1]]
+    await env_computer_provider._launch_held_apps(env, record, "http://computer")
+    assert order == []
 
 
 @pytest.mark.asyncio
