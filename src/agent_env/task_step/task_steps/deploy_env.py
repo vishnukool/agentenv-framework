@@ -192,7 +192,7 @@ class DeployEnvTaskStep(TaskStep):
         if self.env_params:
             if "env_params" not in params and not accepts_kwargs:
                 raise ValueError(f"deploy_env '{self.id}': {env.type} envs take no env_params")
-            deploy_kwargs["env_params"] = self.env_params
+            deploy_kwargs["env_params"] = await env.run_env_params(self.env_params, context.deployed_envs)
         if self.keyed_roles:
             if "keyed_roles" not in params and not accepts_kwargs:
                 raise ValueError(f"deploy_env '{self.id}': {env.type} envs take no keyed_roles")

@@ -2,7 +2,9 @@
 it is usable now through its card's ``urn:agentenv:website/v1`` ``ready`` (``WEBSITE_READY_OP``), answering a
 ``WebsiteReadiness``. ``website_readiness`` asks one site as its card advertises it; ``env_readiness`` asks every site
 of an env, a composed card's children or a single site's own card, and answers for the env as a whole; asking one
-site may take ``READY_TIMEOUT_S`` by default."""
+site may take ``READY_TIMEOUT_S`` by default. A composer serving a site to a browser at a route of its own, as the
+env gateway serves ``/website/<name>/``, says where on the site's ``website/v1`` params, as
+``WEBSITE_BROWSE_URL_PARAM``: a path joined onto the composed card's address, or a full URL."""
 from __future__ import annotations
 
 import asyncio
@@ -14,6 +16,7 @@ from ..client import find_extension_method, invoke_extension
 
 WEBSITE_EXTENSION_URI = "urn:agentenv:website/v1"
 WEBSITE_READY_OP = "ready"
+WEBSITE_BROWSE_URL_PARAM = "browse_url"
 READY_TIMEOUT_S = 10.0
 
 

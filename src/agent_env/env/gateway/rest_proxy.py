@@ -14,8 +14,14 @@ its response streamed through, under four invariants:
   ``default`` the key verified, so a site holding the same key believes the role;
 - the upstream learns the address the client reached it at: ``X-Forwarded-Host`` and ``X-Forwarded-Proto`` (a front's
   own, when one before the gateway sent them, else the request's ``Host`` and scheme) and ``X-Forwarded-Prefix``, the
-  route prefix (``/svc/{service}`` or ``/website/{service}``) the gateway strips, which a client never sets;
+  route prefix (``/svc/{service}`` or ``/website/{service}``) the gateway strips, which a client never sets: a client
+  that serves the route at a root of its own (a computer's site proxy, at ``https://notes.test/``) says so with
+  ``AgentEnv-Site-Root``, and the upstream is then told no prefix;
 - the upstream response and the client it came through are closed when the response ends, iterated or not.
+
+A WebSocket on ``/website/{service}/{path}`` is relayed under the same rules (:func:`relay_websocket`): the gateway
+opens one of its own to the service, with the headers an HTTP request would carry upstream, and relays each message
+and the close, either side's ending ending both.
 
 A backing server's env card names its endpoints relative to itself; :func:`rewrite_child_card` roots them under
 ``/svc/{key}`` so they resolve against the env's address, keeping the gateway's own routes where the gateway offers
@@ -24,6 +30,8 @@ them so :func:`route_name` can name the route a proxied request reached.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import copy
 import json
 import logging
@@ -34,9 +42,12 @@ from typing import Any, NamedTuple
 from urllib.parse import unquote
 
 import httpx
-from starlette.requests import Request
+from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
+from starlette.websockets import WebSocket, WebSocketState
+from websockets.asyncio.client import ClientConnection, connect as connect_websocket
+from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
 # Relative import — gateway runs as a standalone container with no agent_env.*
 from .constants import (
@@ -44,6 +55,7 @@ from .constants import (
     AGENT_ENV_ROLE_KEY_HEADER,
     AGENT_ENV_ROLE_META_KEY,
     AGENT_ENV_SESSION_META_KEY,
+    AGENT_ENV_SITE_ROOT_HEADER,
     CARD_FETCH_TIMEOUT_S,
     DEFAULT_ROLE,
     EXT_WEBSITE_URI,
@@ -63,7 +75,15 @@ ROLE_HEADER_BYTES = AGENT_ENV_ROLE_HEADER.lower().encode()
 ROLE_KEY_HEADER_BYTES = AGENT_ENV_ROLE_KEY_HEADER.lower().encode()
 
 FORWARDED_HOST, FORWARDED_PROTO, FORWARDED_PREFIX = "x-forwarded-host", "x-forwarded-proto", "x-forwarded-prefix"
-_FORWARDED = frozenset(name.encode() for name in (FORWARDED_HOST, FORWARDED_PROTO, FORWARDED_PREFIX))
+_FORWARDED = frozenset(name.encode() for name in (FORWARDED_HOST, FORWARDED_PROTO, FORWARDED_PREFIX,
+                                                   AGENT_ENV_SITE_ROOT_HEADER.lower()))
+# A WebSocket's handshake fields, which the gateway's own connection upstream writes for itself.
+_WEBSOCKET_HANDSHAKE = frozenset({"sec-websocket-key", "sec-websocket-version", "sec-websocket-extensions",
+                                  "sec-websocket-protocol"})
+# What the gateway's own WebSocket handshake answer writes for itself, so a site's copies aren't relayed.
+_WEBSOCKET_ANSWER_DROP = HOP_BY_HOP | {b"date", b"server", b"content-length", b"sec-websocket-accept",
+                                      b"sec-websocket-protocol", b"sec-websocket-extensions"}
+_HTTP_SCHEME = {"ws": "http", "wss": "https"}
 
 
 async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.Timeout, mcp_server: bool,
@@ -101,7 +121,7 @@ async def _done(response: Response, on_done: Callable[[int], Awaitable[None]] | 
     return response
 
 
-def upstream_url(base_url: str, request: Request) -> str:
+def upstream_url(base_url: str, request: HTTPConnection) -> str:
     # Forward the path as received: uvicorn decodes scope["path"] for routing, so Starlette's {path} param
     # would send %2F, %3F and %23 to the upstream as separators. latin-1 keeps one char per wire byte.
     url = base_url
@@ -115,7 +135,7 @@ def upstream_url(base_url: str, request: Request) -> str:
     return url
 
 
-def upstream_headers(request: Request, role: str, role_key: str | None = None) -> httpx.Headers:
+def upstream_headers(request: HTTPConnection, role: str, role_key: str | None = None) -> httpx.Headers:
     """One entry per raw header, so repeated fields (cookie, x-forwarded-for) keep their multiplicity. The role
     and role key headers are the gateway's to set: the client's copies are dropped and the role the gateway
     attributed the request to goes in their place, with `role_key` beside any role but `default`, so the upstream
@@ -132,15 +152,20 @@ def upstream_headers(request: Request, role: str, role_key: str | None = None) -
     return headers
 
 
-def forwarded_address(request: Request) -> dict[str, str]:
+def forwarded_address(request: HTTPConnection) -> dict[str, str]:
     """Where the client reached the proxied service: the host and scheme it addressed (as a front before the gateway
     names them in its own ``X-Forwarded-Host``/``X-Forwarded-Proto``, else the request's ``Host`` and scheme; the
-    client could set ``Host`` anyway, so believing its front names nothing it couldn't), and the route prefix as sent.
-    A header with nothing to say is left out."""
+    client could set ``Host`` anyway, so believing its front names nothing it couldn't), and the route prefix as sent,
+    or none for a client that says with ``AgentEnv-Site-Root`` it serves the route at a root of its own: a computer's
+    site proxy, whose browser would otherwise get the route's prefix twice. Like the host, that only changes the links
+    the client's own answer names; what the route reaches is the path's alone. A header with nothing to say is left
+    out."""
     host = _first(request.headers.get(FORWARDED_HOST, "")) or request.headers.get("host", "")
     proto = _first(request.headers.get(FORWARDED_PROTO, "")).lower()
-    address = {FORWARDED_HOST: host, FORWARDED_PROTO: proto if proto in ("http", "https") else request.url.scheme,
-               FORWARDED_PREFIX: route_prefix(request)}
+    at_root = bool(request.headers.get(AGENT_ENV_SITE_ROOT_HEADER, "").strip())
+    scheme = _HTTP_SCHEME.get(request.url.scheme, request.url.scheme)
+    address = {FORWARDED_HOST: host, FORWARDED_PROTO: proto if proto in ("http", "https") else scheme,
+               FORWARDED_PREFIX: "" if at_root else route_prefix(request)}
     return {name: value for name, value in address.items() if value}
 
 
@@ -148,7 +173,7 @@ def _first(value: str) -> str:
     return value.split(",")[0].strip()
 
 
-def route_prefix(request: Request) -> str:
+def route_prefix(request: HTTPConnection) -> str:
     """The path the client reached the proxied service under, as it sent it: the request-target up to the `{path}`
     remainder, without its trailing slash, e.g. ``/website/notes``, or under a root path ``/env/website/notes``."""
     raw_path = request.scope.get("raw_path") or request.scope["path"].encode()
@@ -205,6 +230,102 @@ def raw_remainder(raw_path: bytes, decoded_path: str, decoded_rest: str) -> byte
     if unquote(rest.decode("latin-1")) != decoded_rest:  # only false when an escaped slash hid inside the prefix
         raise ValueError(f"cannot route request-target {raw_path.decode('latin-1')!r}: percent-encoded slash in the route prefix")
     return rest
+
+
+async def relay_websocket(websocket: WebSocket, base_url: str, *, role: str, role_key: str | None = None,
+                          open_timeout: float = 10.0) -> None:
+    """Relay `websocket` to the service at `base_url` as `role`: a WebSocket of the gateway's own is opened to the same
+    path, with the headers ``upstream_headers`` sends, asking for the subprotocols the client offered; `websocket` is
+    accepted with the one the service chose and the headers its answer carried (a ``Set-Cookie`` among them, each
+    field kept apart), but those the gateway's own answer writes. Each text and binary message is relayed as it came, and either side's
+    close, with its code, closes the other. A service that refuses the handshake has its answer relayed as the refusal;
+    one that never answers is a 502."""
+    try:
+        target_url = upstream_url(base_url, websocket)
+    except ValueError as e:
+        await refuse_websocket(websocket, _json_response({"error": str(e)}, 400))
+        return
+    headers = [(key, value) for key, value in upstream_headers(websocket, role, role_key).multi_items()
+               if key.lower() not in _WEBSOCKET_HANDSHAKE]
+    offered = [protocol.strip() for value in websocket.headers.getlist("sec-websocket-protocol")
+               for protocol in value.split(",") if protocol.strip()]
+    try:
+        upstream = await connect_websocket("ws" + target_url.removeprefix("http"), additional_headers=headers,
+                                           subprotocols=offered or None, user_agent_header=None,
+                                           open_timeout=open_timeout, max_size=None)
+    except InvalidStatus as e:
+        answer = e.response
+        await refuse_websocket(websocket, Response(content=answer.body or b"", status_code=answer.status_code,
+                                                   media_type=answer.headers.get("content-type")))
+        return
+    except (InvalidHandshake, OSError, TimeoutError) as e:
+        logger.error(f"WebSocket proxy to {target_url} failed: {e!r}")
+        await refuse_websocket(websocket, _json_response({"error": f"Proxy request failed: {e!r}"}, 502))
+        return
+    async with upstream:
+        answer = [(key.encode("ascii", "surrogateescape"), value.encode("ascii", "surrogateescape"))
+                  for key, value in upstream.response.headers.raw_items()]
+        await websocket.accept(subprotocol=upstream.subprotocol,
+                               headers=[(key.lower(), value) for key, value in answer
+                                        if key.lower() not in _WEBSOCKET_ANSWER_DROP])
+        await _relay_messages(websocket, upstream)
+
+
+async def refuse_websocket(websocket: WebSocket, response: Response) -> None:
+    """Refuse `websocket`'s handshake with `response`, or, on a server that can't send one, a 403."""
+    if "websocket.http.response" in websocket.scope.get("extensions", {}):
+        await websocket.send_denial_response(response)
+    else:
+        await websocket.close(1008)
+
+
+async def _relay_messages(websocket: WebSocket, upstream: ClientConnection) -> None:
+    """Both directions of an accepted WebSocket until either ends, then both closed: the client's close goes upstream
+    with its code, and the service's to the client."""
+
+    async def from_client() -> None:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                await upstream.close(_sendable(message.get("code"), abnormal=1001), message.get("reason") or "")
+                return
+            if message.get("text") is not None:
+                await upstream.send(message["text"])
+            elif message.get("bytes") is not None:
+                await upstream.send(message["bytes"])
+
+    async def from_upstream() -> None:
+        async for data in upstream:
+            if isinstance(data, str):
+                await websocket.send_text(data)
+            else:
+                await websocket.send_bytes(data)
+
+    tasks = [asyncio.create_task(from_client()), asyncio.create_task(from_upstream())]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await upstream.close()
+        if WebSocketState.DISCONNECTED not in (websocket.client_state, websocket.application_state):
+            with contextlib.suppress(RuntimeError, OSError, ConnectionClosed):
+                await websocket.close(_sendable(upstream.close_code, abnormal=1011), upstream.close_reason or "")
+
+
+def _sendable(code: int | None, *, abnormal: int) -> int:
+    """A close code one side reported, as one the other may be sent: none (1005) as a normal close, and a closure
+    with no close frame (1006, 1015) or a code no endpoint may send as `abnormal`.
+
+    >>> [_sendable(c, abnormal=1011) for c in (None, 1005, 1000, 1006, 4001, 1004)]
+    [1000, 1000, 1000, 1011, 4001, 1011]
+    """
+    if code in (None, 1005):
+        return 1000
+    if 1000 <= code <= 1003 or 1007 <= code <= 1014 or 3000 <= code <= 4999:
+        return code
+    return abnormal
 
 
 class UpstreamResponse(StreamingResponse):

@@ -81,6 +81,7 @@ EXT_CHANGES_URI = "urn:agentenv:changes/v1"
 EXT_NOTIFICATIONS_URI = "urn:agentenv:notifications/v1"
 EXT_WEBSITE_URI = "urn:agentenv:website/v1"
 WEBSITE_READY_OP = "ready"
+WEBSITE_BROWSE_URL_PARAM = "browse_url"
 
 # Rows per GET /changes page: the default, and the most a client may ask for.
 CHANGES_PAGE_DEFAULT = 1000
@@ -144,6 +145,8 @@ GATEWAY_TRAJECTORY_FILE = os.environ.get(
 
 AGENT_ENV_ROLE_HEADER = "AgentEnv-Role"
 AGENT_ENV_ROLE_KEY_HEADER = "AgentEnv-Role-Key"
+# Sent by a computer's site proxy, which serves a website's route at the root of the site's own name.
+AGENT_ENV_SITE_ROOT_HEADER = "AgentEnv-Site-Root"
 GATEWAY_ROLE_KEY_ENV = "AGENTENV_ROLE_KEY"
 WEBSITE_ROLE_KEY_ENV = "WEBSITE_ROLE_KEY"
 # MCP request `_meta` keys the gateway stamps on every child tools/call: the caller's role, and on the MCP path a

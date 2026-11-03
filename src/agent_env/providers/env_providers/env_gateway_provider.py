@@ -936,7 +936,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         card = await self._wait_for_tunnel(gateway_url, timeout=120)
         if card is None:
             raise RuntimeError("Tunnel did not become ready in time")
-        await _wait_for_websites(gateway_url, website_configs or [])
+        if website_configs:
+            await _wait_for_websites(gateway_url, website_configs)
+            card = await self._wait_for_tunnel(gateway_url, timeout=120) or card
         card_read_at_utc = datetime.now(timezone.utc).isoformat()
         await self._refuse_tool_name_clashes(gateway_url)
         mcp_url = _mcp_url(gateway_url, card)

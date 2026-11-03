@@ -2052,6 +2052,40 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog, keyed_roles
 
 
 @pytest.mark.asyncio
+async def test_a_deploy_with_websites_records_the_card_read_once_they_are_ready():
+    """The gateway composes its card from its children's as it reads them, so the card read before the sites were up
+    may lack them; the one recorded is read once they're ready, as what reads the sites from it expects."""
+    from agent_env.providers.env_state import DatabaseStateProvider
+
+    gp, external = EnvironmentGatewayProvider(), MagicMock(state_type="remote", instance_id="st-ext")
+    state_provider = MagicMock(spec=DatabaseStateProvider, prepare=AsyncMock(), teardown=AsyncMock())
+    vm = MagicMock(sandbox_id="vm-1", type="modal_vm", tunnel_urls={18765: "https://vm.example"}, host_port=lambda port: port, host_ips=(),
+                   load_docker_images=AsyncMock(), exec_script=AsyncMock(), exec_with_output=AsyncMock(return_value=(0, "gateway", "")))
+    env = WebsiteEnv(id="web-shop", version=1, backend_docker_image_artifact=_loadable("shop-be"),
+                     frontend_docker_image_artifact=_loadable("shop-fe"), environment_name="shop")
+    before, after = {"name": "env1234", "children_environments": []}, {"name": "env1234", "children_environments": [{"name": "shop"}]}
+
+    with patch("agent_env.providers.env_state.acquire_state_for_deploy", AsyncMock(return_value=external)), \
+         patch("agent_env.providers.env_state.build_state_provider", return_value=state_provider), \
+         patch("agent_env.env.env.Env.get", MagicMock(return_value=MagicMock(docker_image_artifact=_loadable("gw")))), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
+         patch.object(gp, "create_docker_compose", return_value="services: {}"), \
+         patch.object(gp, "_wait_for_gateway", AsyncMock(return_value=True)), \
+         patch.object(gp, "_get_container_id", AsyncMock(return_value=None)), \
+         patch.object(gp, "_wait_for_tunnel", AsyncMock(side_effect=[before, after])), \
+         patch.object(gp, "_refuse_tool_name_clashes", AsyncMock()), \
+         patch.object(env_gateway_provider, "_wait_for_websites", AsyncMock()) as websites_waited, \
+         patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value=set())), \
+         patch("agent_env.providers.env_providers.env_gateway_provider.asyncio.sleep", AsyncMock()):
+        record = await gp.deploy(env, _vm_provider(create_vm=AsyncMock(return_value=vm)), ttl_seconds=60, env_state_type="remote")
+
+    websites_waited.assert_awaited_once()
+    assert record.environment_card == after
+    assert record.website_frontend_urls == {"shop": "https://vm.example/website/shop/"}
+    await gp.close()
+
+
+@pytest.mark.asyncio
 async def test_deploy_records_the_gateways_sidecar_urls_and_its_containers():
     gp, sandboxes = EnvironmentGatewayProvider(), {i: _FakeSandbox(i, 18765, f"https://{i}") for i in ("gw", "srv", "db", "pg", "dm")}
     env = MagicMock(id="slack-env", version=1, environment_name="slack", docker_image_artifact=MagicMock(image_name="mcp-slack"))

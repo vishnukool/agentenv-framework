@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import functools
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
@@ -15,6 +15,7 @@ from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedSandboxEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.utils.probing import probe_first_boot
+from agent_env.env.envs.computer.utils import sites
 from agent_env.env.envs.computer.utils.boot import (
     app_settings_environment,
     boot,
@@ -36,6 +37,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox
 if TYPE_CHECKING:
     from agent_env.env.env import Env
     from agent_env.env.envs.computer.env import ComputerEnv
+    from agent_env.providers.sandbox_providers.sandbox import Sandbox
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 logger = logging.getLogger(__name__)
@@ -74,6 +76,9 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         params, values, problems = computer_params.checked(env, env_params)
         if problems:
             raise DeployRefused(f"{env.id}: " + "; ".join(problems))
+        if params.site_routing and not params.sites:
+            raise DeployRefused(f"{env.id}: env_params.site_routing reaches the run's websites, which a run's "
+                                "deploy_env names in env_params.sites; give them there to deploy it any other way")
         await env.compose_unstarted(sandbox_provider, params.form)
         if not (builds := env.deployable_builds(params.form)):
             raise DeployRefused(f"{env.id} has no ready build to deploy; its builds are "
@@ -132,6 +137,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     "env_params": params.model_dump(exclude_defaults=True)}},
             )
             await _require_display(record, values.get("resolution"))
+            if params.site_routing:
+                record.metadata["computer"]["sites"] = await _route_sites(env, booted.sandbox, params, ttl_seconds)
         except BaseException:
             await discard(booted.sandbox)
             raise
@@ -161,6 +168,17 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                            deployed.control_token)
         _require_name(env, card)
         await _require_display(deployed, values.get("resolution"))
+        if params.site_routing:
+            record["sites"] = await _route_sites(env, sandbox, params, record["sites"]["valid_for_s"])
+
+
+async def _route_sites(env: ComputerEnv, sandbox: Sandbox, params: computer_params.ComputerParams,
+                       valid_for_s: int) -> dict:
+    """The computer on ``sandbox`` routed to ``params.sites`` under a CA of its own, valid ``valid_for_s``; what its
+    record keeps of it."""
+    routed = await sites.route(sandbox, params.sites, user=env.computer.session.user, network=env.network,
+                               valid_for=timedelta(seconds=valid_for_s), label=env.environment_name)
+    return {**routed, "valid_for_s": valid_for_s}
 
 
 async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:

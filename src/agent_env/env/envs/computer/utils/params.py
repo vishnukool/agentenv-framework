@@ -1,20 +1,35 @@
 """What a deploy of a computer env takes as ``deploy_env`` ``env_params``: the form to boot, ``computer_settings``,
 values of the base's deploy-phase settings, ``driver_settings``, the driver's ``ComputerSettings``, such as the default
-coordinate space its tools describe, and ``app_settings``, values of each app's ``Settings`` by its name. The env's
-display and network are its own, which no deploy overrides."""
+coordinate space its tools describe, ``app_settings``, values of each app's ``Settings`` by its name, and
+``site_routing``, opt-in, to reach the run's websites by their names from the computer: its ``sites``, which deploy_env
+fills in from the websites the run deployed before the computer, all of them or those of the env ids it lists. The
+env's display and network are its own, which no deploy overrides."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from agentenv_protocol.computer import ComputerSettings
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from agent_env.artifact.artifacts.computer import SettingValue
-from agent_env.env.envs.computer.utils import gate
+from agent_env.env.envs.computer.utils import gate, sites
 
 if TYPE_CHECKING:
     from agent_env.env.envs.computer.env import ComputerEnv
+
+
+class Site(BaseModel):
+    """A website the computer reaches by its names: its route on the env gateway, as this process reaches it, and what
+    its card's website/v1 declares: its names, and for a live site, which the real site serves, the hosts it calls."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    url: str
+    domains: list[str] = Field(default_factory=list)
+    live: bool = False
+    allow_hosts: list[str] = Field(default_factory=list)
 
 
 class ComputerParams(BaseModel):
@@ -24,6 +39,8 @@ class ComputerParams(BaseModel):
     computer_settings: dict[str, Any] = Field(default_factory=dict)
     driver_settings: dict[str, Any] = Field(default_factory=dict)
     app_settings: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    site_routing: Union[StrictBool, list[str]] = False
+    sites: list[Site] = Field(default_factory=list)
 
 
 def checked(env: ComputerEnv, env_params: Optional[dict]) -> tuple[ComputerParams, dict[str, SettingValue], list[str]]:
@@ -55,6 +72,10 @@ def checked(env: ComputerEnv, env_params: Optional[dict]) -> tuple[ComputerParam
     merged = app_settings(env, params.app_settings)
     for name, app in apps.items():
         problems += gate.check_app_settings(app, merged[name], f"env_params.app_settings.{name}", env.computer.os.type)
+    if params.sites and not params.site_routing:
+        problems.append("env_params.sites: a computer reaches sites only with site_routing")
+    allow_hosts = (env.network or {}).get("allow_hosts") or ()
+    problems += sites.table_problems(params.sites, allow_hosts) if params.sites else []
     return params, values, problems
 
 

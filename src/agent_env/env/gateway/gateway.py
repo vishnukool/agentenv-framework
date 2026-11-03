@@ -31,8 +31,10 @@ from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata, ArgModelBas
 from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent, Tool as MCPTool
 from pydantic import create_model
-from starlette.requests import Request
+from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response, StreamingResponse
+from starlette.routing import WebSocketRoute
+from starlette.websockets import WebSocket
 from anyio import ClosedResourceError
 
 if TYPE_CHECKING:
@@ -64,6 +66,7 @@ from .constants import (
     STEP_SOURCE_POST_TURN_HOOK,
     TOOL_DISABLE_ACTION,
     TOOL_ENABLE_ACTION,
+    WEBSITE_BROWSE_URL_PARAM,
     WELL_KNOWN_PATH,
     WILDCARD,
     GatewayMode,
@@ -82,6 +85,8 @@ from .rest_proxy import (
     fetch_child_card,
     forward,
     operations,
+    refuse_websocket,
+    relay_websocket,
     rewrite_child_card,
     route_name,
     upstream_url,
@@ -221,6 +226,11 @@ class Gateway:
             )
             async def proxy_to_frontend_root(request: Request) -> Response:
                 return await self._proxy_website_request(request)
+
+            self._mcp._custom_starlette_routes += [
+                WebSocketRoute("/website/{service_name}/{path:path}", self._proxy_website_socket),
+                WebSocketRoute("/website/{service_name}", self._proxy_website_socket),
+            ]
 
         @self._mcp.custom_route(f"/tools/{TOOL_DISABLE_ACTION}", methods=["POST"])
         async def tools_disable(request: Request) -> Response:
@@ -679,6 +689,25 @@ class Gateway:
             await self._await_barriers(barrier_tasks, barrier_timeout_s)
         return response
 
+    async def _proxy_website_socket(self, websocket: WebSocket) -> None:
+        """Relay a WebSocket on a site's route to its server, as its HTTP requests are: its data plane and card, and
+        every path its card advertises for agentenv (``site_reserved_paths``), are refused, and it goes upstream with
+        the role, role key and forwarded address an HTTP request would carry."""
+        reserved = await self._site_reserved_paths(websocket.path_params["service_name"])
+        if reserved is None:
+            await refuse_websocket(websocket, self._json_response({"error": "website card unavailable"}, 503))
+            return
+        if reserved_site_request(websocket, reserved):
+            await refuse_websocket(websocket, self._json_response({"error": "not found"}, 404))
+            return
+        service_name = websocket.path_params["service_name"]
+        base_url = self.website_urls.get(service_name)
+        if base_url is None:
+            await refuse_websocket(websocket, self._json_response({"error": f"Unknown service: {service_name}"}, 404))
+            return
+        await relay_websocket(websocket, base_url, role=self._request_role(websocket), role_key=self._role_key,
+                              open_timeout=self.REST_PROXY_CONNECT_TIMEOUT_S)
+
     async def _fire_website_triggers(self, request: Request, app: str,
                                      status: int) -> tuple[list[asyncio.Task], float | None]:
         """Feed an answered website request to the trigger engine (fail-open)."""
@@ -692,7 +721,7 @@ class Gateway:
             logger.exception("Trigger evaluation failed (fail-open)")
             return [], None
 
-    def _request_role(self, request: Request) -> str:
+    def _request_role(self, request: HTTPConnection) -> str:
         """The role the gateway attributes a REST request to: the first AgentEnv-Role header, as `_attributed_role`
         believes it, else the default role."""
         return self._attributed_role(request.headers.get(AGENT_ENV_ROLE_HEADER, ""),
@@ -767,7 +796,15 @@ class Gateway:
         return list(self.rest_proxy_urls)
 
     def _rewrite_child_card(self, key: str, card: dict) -> dict:
-        return rewrite_child_card(key, card, self._gateway_extensions())
+        """One backing server's card rooted at the gateway (``rewrite_child_card``); a website's ``website/v1`` params
+        also name the route the gateway serves it to a browser at, ``/website/<key>/``, as ``browse_url``."""
+        card = rewrite_child_card(key, card, self._gateway_extensions())
+        if key in self.website_urls:
+            for ext in (card.get("capabilities") or {}).get("extensions") or []:
+                if isinstance(ext, dict) and ext.get("uri") == EXT_WEBSITE_URI:
+                    params = ext.get("params") if isinstance(ext.get("params"), dict) else {}
+                    ext["params"] = {**params, WEBSITE_BROWSE_URL_PARAM: f"/website/{key}/"}
+        return card
 
     async def _fetch_child_card(self, client: httpx.AsyncClient, key: str, base_url: str) -> dict | None:
         """Fetch + rewrite one backing server's card; None (omit) on 404 / error / timeout / malformed JSON. A
@@ -1634,7 +1671,7 @@ def site_reserved_paths(card: dict) -> frozenset[str]:
     return frozenset(_normalized(p) for p in paths if isinstance(p, str) and p.startswith("/") and _normalized(p) != "/")
 
 
-def site_request_path(request: Request) -> str | None:
+def site_request_path(request: HTTPConnection) -> str | None:
     """The path a site's server receives for a request on its route: the raw path forwarded, its dot segments removed
     by httpx and then decoded. It differs from the path as routed here when an encoded slash sits beside a dot segment
     (``public%2Fx/../api`` reaches ``/api``). None for a request-target the proxy can't build a URL for: ``forward()``
@@ -1645,10 +1682,11 @@ def site_request_path(request: Request) -> str | None:
         return None
 
 
-def reserved_site_request(request: Request, reserved: frozenset[str] = frozenset()) -> bool:
-    """Whether a request on a site's route reaches its data plane or env card, or one of the paths ``reserved`` names
-    (``site_reserved_paths``): by the path as routed here, or by the one its server receives (``site_request_path``).
-    A request-target the proxy can't build a URL for isn't reserved here: ``forward()`` refuses it."""
+def reserved_site_request(request: HTTPConnection, reserved: frozenset[str] = frozenset()) -> bool:
+    """Whether a request or WebSocket on a site's route reaches its data plane or env card, or one of the paths
+    ``reserved`` names (``site_reserved_paths``): by the path as routed here, or by the one its server receives
+    (``site_request_path``). A request-target the proxy can't build a URL for isn't reserved here: ``forward()``
+    refuses it."""
     if reserved_site_path("/" + request.path_params.get("path", ""), reserved):
         return True
     sent = site_request_path(request)
