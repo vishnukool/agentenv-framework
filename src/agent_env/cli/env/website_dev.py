@@ -30,6 +30,8 @@ from agentenv_protocol.website.clock import iso, parse_time
 SITE_ENV = "AGENT_ENV_WEBSITE_DEV_SITE"
 BOOT_HEADER = "X-Site-Boot"
 POLL_QUERY = "agent-env-dev-poll"
+RELOAD_INCLUDES = ["*.py", "*.json", "*.toml"]
+WATCHER_STOP_TIMEOUT_S = 5.0
 _WEB_SKIPPED = {"node_modules", "dist"}
 
 
@@ -264,11 +266,13 @@ class Supervisor:
     couldn't prime, before or after the check and for a seed it couldn't read too, counts as unprimed, so the next
     poll tries again."""
 
+    HTTP_TIMEOUT_S = 10.0
+
     def __init__(self, base_url: str, clock_url: str, seed: Path | None, *, check: bool = True,
                  echo: Callable[[str], None] = print, client: httpx.Client | None = None, interval: float = 1.0) -> None:
         self.base_url, self.clock_url, self.seed, self.check = base_url, clock_url, seed, check
         self.echo, self.interval = echo, interval
-        self.client = client or httpx.Client(timeout=10)
+        self.client = client or httpx.Client(timeout=self.HTTP_TIMEOUT_S)
         self.primed: str | None = None
         self.checked = False
         self.stopped = threading.Event()

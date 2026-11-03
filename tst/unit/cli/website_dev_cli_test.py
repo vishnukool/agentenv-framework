@@ -294,6 +294,7 @@ def test_dev_runs_uvicorn_with_reload_beside_the_clock_and_the_supervisor(site_d
     options = run.call_args.kwargs
     assert (options["factory"], options["reload"], options["port"]) == (True, True, 8123)
     assert options["reload_dirs"] == [str(site_dir.resolve())]
+    assert options["reload_includes"] == ["*.py", "*.json", "*.toml"]
     assert options["reload_excludes"] == [str(site_dir.resolve() / "web")]
     assert "http://127.0.0.1:8123/" in result.output and "/clock/advance" in result.output
     supervisor.stop.assert_called_once()

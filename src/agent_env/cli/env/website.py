@@ -146,14 +146,14 @@ def dev(directory: Path, site_file: str, host: str, port: int, clock_port: int, 
     os.environ[website_dev.SITE_ENV] = str(site_path)
     try:
         uvicorn.run("agent_env.cli.env.website_dev:create_app", factory=True, host=host, port=port, reload=True,
-                    reload_dirs=[str(site_dir)], reload_includes=["*.py", "*.json"], reload_excludes=excludes or None)
+                    reload_dirs=[str(site_dir)], reload_includes=website_dev.RELOAD_INCLUDES, reload_excludes=excludes or None)
     finally:
         supervisor.stop()
         clock.close()
         if watcher is not None:
             watcher.terminate()
             try:
-                watcher.wait(timeout=5)
+                watcher.wait(timeout=website_dev.WATCHER_STOP_TIMEOUT_S)
             except subprocess.TimeoutExpired:
                 watcher.kill()
 
