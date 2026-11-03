@@ -10,6 +10,7 @@ from agent_env.artifact.store import get_artifact_store
 
 from agent_env.cli.env.website import website
 from agent_env.env import Env
+from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_HEALTH_PATH
 
 
 def _stored(id, **_):
@@ -27,14 +28,22 @@ def test_a_site_is_built_from_its_server_dockerfile_alone_with_its_build_context
     with patch("agent_env.cli.env.website.build_image", side_effect=lambda *a, **k: built.append(a[2])), \
             patch("agent_env.artifact.artifacts.docker_image.DockerImageArtifact.put",
                   side_effect=lambda **k: _stored(k["id"])) as stored:
-        result = _put("--server-dockerfile", str(tmp_path / "Dockerfile"), "--environment-name", "mail",
-                      "--health-path", "/healthz")
+        result = _put("--server-dockerfile", str(tmp_path / "Dockerfile"), "--environment-name", "mail")
     assert result.exit_code == 0, result.output
     assert len(built) == 1 and "deprecated" not in result.output
     assert stored.call_args.kwargs["build_context_path"] == str(tmp_path)
     assert stored.call_args.kwargs["dockerfile_path"] == str(tmp_path / "Dockerfile")
     env = Env.get("mail-site")
-    assert (env.frontend_docker_image_artifact, env.health_path) == (None, "/healthz")
+    assert (env.frontend_docker_image_artifact, env.health_path) == (None, AGENT_ENV_WEBSITE_HEALTH_PATH)
+
+
+def test_a_health_path_is_kept_for_a_site_without_ready_and_warned_of_as_deprecated(local_stores):
+    with patch("agent_env.cli.env.website.DockerImageArtifact.put_ref", side_effect=lambda id, **k: _stored(id)):
+        result = _put("--server-image-ref", "ghcr.io/acme/mail:3", "--environment-name", "mail",
+                      "--health-path", "/healthz")
+    assert result.exit_code == 0, result.output
+    assert "--health-path is deprecated" in result.output
+    assert Env.get("mail-site").health_path == "/healthz"
 
 
 def test_a_site_registers_a_server_image_already_in_a_registry(local_stores):

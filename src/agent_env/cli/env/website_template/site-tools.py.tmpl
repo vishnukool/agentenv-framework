@@ -1,0 +1,36 @@
+"""{{title}}: a site on ``agentenv_protocol.website.WebsiteEnvironment``, made by ``agent-env env website new`` from
+the tools of {{source}}. Each tool is a stub ``@api`` route of the same name, which answers 501 until it is written; the
+seed in ``data/seed.json`` has a collection for each of them to fill. A browser with no session is signed in as the
+acting user, the seed's ``current_user``, and can sign in as another seeded user.
+
+Run it with ``agent-env env website dev``, or with ``python site.py`` after building ``web/`` into ``web/dist``; it
+serves on ``PORT`` (8000)."""
+from __future__ import annotations
+
+{{typing_import}}from pydantic import BaseModel, Field
+
+from agentenv_protocol import environment_card
+from agentenv_protocol.website import ApiContext, ApiError, NotFound, WebsiteEnvironment, api, ready_check, website
+
+USERS = "users"
+
+
+class SignIn(BaseModel):
+    user: str
+{{models}}
+
+@environment_card(name="{{name}}")
+@website(domains=["{{domain}}"], static="web/dist", health="/healthz", data="data/seed.json")
+class {{class_name}}(WebsiteEnvironment):
+    @ready_check
+    def seeded(self) -> bool:
+        """The site is usable once its store knows who may sign in."""
+        return bool(self.store[USERS])
+{{builtin_routes}}{{routes}}
+
+def _stub(tool: str) -> ApiError:
+    return ApiError(f"{tool} is a stub: write what it does in site.py", status=501, code="not_implemented")
+
+
+if __name__ == "__main__":
+    {{class_name}}().serve()

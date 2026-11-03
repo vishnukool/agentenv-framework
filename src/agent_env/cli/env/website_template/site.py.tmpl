@@ -1,0 +1,78 @@
+"""{{title}}: a site on ``agentenv_protocol.website.WebsiteEnvironment``, made by ``agent-env env website new``. Each
+user keeps a list of items; a browser with no session is signed in as the acting user, the seed's ``current_user``, and
+can sign in as another seeded user. The site keeps its state in the default store, which the data plane loads, exports
+and resets, and stamps each item with the universe's time.
+
+Run it with ``agent-env env website dev``, or with ``python site.py`` after building ``web/`` into ``web/dist``; it
+serves on ``PORT`` (8000)."""
+from __future__ import annotations
+
+from pydantic import BaseModel
+
+from agentenv_protocol import environment_card
+from agentenv_protocol.website import (
+    ApiContext,
+    BadRequest,
+    NotFound,
+    Unauthorized,
+    WebsiteEnvironment,
+    api,
+    ready_check,
+    website,
+)
+from agentenv_protocol.website.clock import iso
+
+ITEMS = "items"
+USERS = "users"
+
+
+class NewItem(BaseModel):
+    title: str
+
+
+class SignIn(BaseModel):
+    user: str
+
+
+@environment_card(name="{{name}}")
+@website(domains=["{{domain}}"], static="web/dist", health="/healthz", data="data/seed.json")
+class {{class_name}}(WebsiteEnvironment):
+    @ready_check
+    def seeded(self) -> bool:
+        """The site is usable once its store knows who may sign in."""
+        return bool(self.store[USERS])
+
+    @api.get("/api/users", name="list_users")
+    def list_users(self) -> list:
+        """The users a browser can sign in as."""
+        return self.store[USERS]
+
+    @api.post("/api/sign-in", name="sign_in")
+    def sign_in(self, body: SignIn, ctx: ApiContext) -> dict:
+        """Sign the browser in as one of the site's users."""
+        if self.store.get(USERS, body.user) is None:
+            raise NotFound(f"no user {body.user!r}")
+        ctx.sign_in(body.user)
+        return {"user": ctx.user}
+
+    @api.get("/api/items", name="list_items")
+    def list_items(self, ctx: ApiContext) -> list:
+        """The signed-in user's items, newest first."""
+        return sorted(self.store.find(ITEMS, owner=self._user(ctx)), key=lambda item: item["created_at"], reverse=True)
+
+    @api.post("/api/items", name="create_item", status=201)
+    def create_item(self, item: NewItem, ctx: ApiContext) -> dict:
+        """Add an item for the signed-in user, created now."""
+        if not item.title.strip():
+            raise BadRequest("an item needs a title", code="empty_title")
+        return self.store.insert(ITEMS, {"owner": self._user(ctx), "title": item.title.strip(),
+                                         "created_at": iso(self.now())})
+
+    def _user(self, ctx: ApiContext) -> str:
+        if ctx.user is None:
+            raise Unauthorized("sign in first")
+        return ctx.user
+
+
+if __name__ == "__main__":
+    {{class_name}}().serve()

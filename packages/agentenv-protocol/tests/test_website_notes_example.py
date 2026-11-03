@@ -237,3 +237,9 @@ def test_the_built_page_loads_its_assets_and_api_under_the_gateways_prefix() -> 
     assert not [path for path in called if path.startswith("/")], called
     assert browser.get(urljoin(page_url, "api/session")).json()["user"] == "ann"
     assert [u["id"] for u in browser.get(urljoin(page_url, "api/users")).json()] == ["ann", "ben"]
+
+
+def test_the_page_uses_the_sdks_browser_client_as_the_package_ships_it() -> None:
+    shipped = Path(website.__code__.co_filename).parent / "client" / "site-client.js"
+    assert (NOTES_DIR / "web" / "src" / "site-client.js").read_text(encoding="utf-8") == shipped.read_text(encoding="utf-8")
+    assert 'from "./site-client.js"' in (NOTES_DIR / "web" / "src" / "main.js").read_text(encoding="utf-8")

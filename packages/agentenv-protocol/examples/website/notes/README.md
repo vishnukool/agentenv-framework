@@ -9,7 +9,7 @@ them. The page shows the universe's time.
 | `website.toml` | The site's spec: its name, domains, health path, source, seed, collections, personas, roles, routes, state read and clock (see `docs/website-spec.md`). |
 | `site.py` | The server: the `Notes` WebsiteEnvironment, declared from `website.toml`, its `@api` routes, and `serve()` on `PORT` (8000). |
 | `data/seed.json` | The seed data: two users (`ann`, `ben`), their notes, and `current_user`, the acting user. |
-| `web/` | A minimal Vite app (`index.html`, `src/main.js`, `src/style.css`). Its assets (`base: "./"`) and API calls are relative to the page, so it works at `/` and under the gateway's `/website/notes/` alike; opened at a path without its final slash, such as `/website/notes`, the page first reloads itself with it. |
+| `web/` | A minimal Vite app (`index.html`, `src/main.js`, `src/style.css`, and `src/site-client.js`, a copy of the SDK's browser client). Its assets (`base: "./"`) and API calls are relative to the page, so it works at `/` and under the gateway's `/website/notes/` alike; opened at a path without its final slash, such as `/website/notes`, the page first reloads itself with it. |
 | `Dockerfile` | The server image: Node builds `web/`, then Python installs this repo's `packages/agentenv-protocol` with uvicorn. It installs `curl`, which the gateway's compose health check runs. |
 | `env.toml` | The website env as a bundle entry, pointing at `website.toml`. |
 
@@ -38,7 +38,8 @@ them. The page shows the universe's time.
 - **Time.** Notes are stamped with `self.now()`, which follows the gateway's clock once `clock/v1`'s `sync_time` names
   it. The frontend reads `X-Universe-Now` from every API response into `universeNow()` and shows it in the header.
   It uses this helper rather than `clock_patch=True`, so the page works the same against a server written without the
-  SDK.
+  SDK. The helper and the page's `api()`, `session()` and `signIn()` come from `src/site-client.js`, a copy of
+  `agentenv_protocol/website/client/site-client.js`, which a test keeps it the same as.
 - **Readiness.** `@ready_check seeded` holds `/healthz` at 503 until the store has users, for example after a
   `data/reset` and before the next `data/add`.
 
@@ -53,6 +54,10 @@ PYTHONPATH=<repo>/packages/agentenv-protocol/src python site.py
 
 Open http://localhost:8000. To work on the frontend, run `npm run dev` in `web/` while `site.py` runs; Vite proxies
 `/api` to port 8000.
+
+Or run `agent-env env website dev` from this folder: it builds `web/` when it is out of date and rebuilds it as it
+changes, serves `site.py` with reload, syncs it to a local stand-in for the gateway's clock, loads `data/seed.json`
+through the data plane after every reload, and runs the conformance check once.
 
 ## Test it
 
@@ -88,7 +93,7 @@ the container before using it.
 ```bash
 agent-env env website put --id notes-site \
   --server-dockerfile packages/agentenv-protocol/examples/website/notes/Dockerfile \
-  --server-docker-context . --health-path /healthz
+  --server-docker-context .
 ```
 
 Run it from the repo root. `environment_name` comes from the card, which the spec names `notes`. The stored env
