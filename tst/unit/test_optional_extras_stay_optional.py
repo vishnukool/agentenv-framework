@@ -32,7 +32,7 @@ sys.meta_path.insert(0, Refuse())
 _NOT_CORE = (
     "agent_env.providers.sandbox_providers.sail_vm", "agent_env.providers.sandbox_providers.smol_vm",
     "agent_env.openenv", "agent_env.training.nemo_gym", "agent_env.training.verl", "agent_env.training.skyrl",
-    "agent_env.training.harness",
+    "agent_env.training.harness", "agent_env.training.tinker",
     "agent_env.env.gateway",
     "agent_env.task_step.task_steps.run_code_runner",
 )
