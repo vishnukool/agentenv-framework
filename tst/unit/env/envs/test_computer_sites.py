@@ -371,6 +371,27 @@ async def test_the_sites_a_run_deployed_are_its_stored_cards_website_children_at
 
 
 @pytest.mark.asyncio
+async def test_a_card_child_named_apart_from_its_service_is_matched_to_its_frontend_by_its_route(monkeypatch):
+    from agentenv_protocol import client as protocol_v1
+
+    from agent_env.env.env import DeployedGatewayEnv
+
+    async def get_card(url, timeout=10, verify=True):
+        raise AssertionError(f"read {url} live")
+
+    monkeypatch.setattr(protocol_v1, "get_card", get_card)
+    card = {"name": "env", "children_environments": [{"name": "Notes", "url": "/svc/notes/agentenv", "capabilities": {
+        "extensions": [{"uri": "urn:agentenv:website/v1", "params": {"domains": ["notes.test"]}}]}}]}
+    gateway = DeployedGatewayEnv(env_id="sites", env_version=1, sandbox_id="s", gateway_url="https://gw.example",
+                                 environment_card=card,
+                                 website_frontend_urls={"notes": "https://gw.example/website/notes/"})
+
+    assert await sites.deployed_sites([gateway]) == [
+        {"name": "Notes", "url": "https://gw.example/website/notes/", "domains": ["notes.test"], "live": False,
+         "allow_hosts": []}]
+
+
+@pytest.mark.asyncio
 async def test_a_card_that_fails_to_load_is_retried_then_fails_rather_than_dropping_the_sites_names(monkeypatch):
     from agentenv_protocol import client as protocol_v1
 

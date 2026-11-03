@@ -5,6 +5,7 @@ message and either side's close is relayed."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import socket
 
 import pytest
@@ -173,6 +174,28 @@ async def test_a_websocket_to_a_path_the_sites_card_advertises_is_refused(path):
         await site_server.shutdown()
 
     assert refused.value.response.status_code == 404 and [p for p, _ in site.handshakes] == ["/live"]
+
+
+@pytest.mark.asyncio
+async def test_a_message_from_the_site_over_the_limit_closes_both_sides_with_1009(stack, monkeypatch):
+    from agent_env.env.gateway import rest_proxy
+
+    site, route = stack
+    monkeypatch.setattr(rest_proxy, "WEBSOCKET_MESSAGE_MAX_BYTES", 1024)
+
+    async def big(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.send_bytes(b"x" * 2048)
+        with contextlib.suppress(WebSocketDisconnect):
+            while (await websocket.receive())["type"] != "websocket.disconnect":
+                pass
+
+    site.app.router.routes.insert(0, WebSocketRoute("/big", big))
+    async with connect(f"{route}/big") as websocket:
+        with pytest.raises(ConnectionClosed) as closed:
+            await asyncio.wait_for(websocket.recv(), 5)
+
+    assert closed.value.rcvd.code == 1009
 
 
 @pytest.mark.asyncio

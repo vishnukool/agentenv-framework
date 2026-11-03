@@ -416,19 +416,27 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
                 continue
             params = protocol_v1.extension_params(child.card, WEBSITE_EXTENSION_URI)
             browse = params.get(WEBSITE_BROWSE_URL_PARAM)
+            service = _served_as(child)
             url = (_joined(address, browse) if isinstance(browse, str) and browse and address
-                   else frontends.get(child.name))
+                   else frontends.get(service))
             if url is None:
                 logger.warning("site routing: the website %s of env %s names no route a browser reaches it at, so it "
                                "isn't routed", child.name, record.env_id)
                 continue
-            named.add(child.name)
+            named.add(service)
             found.append(_found(child.name, url, params))
         for name, url in frontends.items():
             if name not in named:
                 card = await _site_card(protocol_v1, f"{gateway_url_of(record)}/svc/{name}", name)
                 found.append(_found(name, url, protocol_v1.extension_params(card, WEBSITE_EXTENSION_URI)))
     return found
+
+
+def _served_as(child) -> str:
+    """The gateway service a child env is served as: the ``<name>`` of the ``/svc/<name>/`` route its url is at, which
+    ``website_frontend_urls`` keys it by, else its card's name."""
+    parts = urlsplit(child.url or "").path.strip("/").split("/")
+    return parts[1] if len(parts) > 1 and parts[0] == "svc" and parts[1] else child.name
 
 
 def _found(name: str, url: str, params: dict) -> dict:

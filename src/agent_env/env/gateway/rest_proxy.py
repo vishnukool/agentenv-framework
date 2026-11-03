@@ -84,6 +84,7 @@ _WEBSOCKET_HANDSHAKE = frozenset({"sec-websocket-key", "sec-websocket-version", 
 _WEBSOCKET_ANSWER_DROP = HOP_BY_HOP | {b"date", b"server", b"content-length", b"sec-websocket-accept",
                                       b"sec-websocket-protocol", b"sec-websocket-extensions"}
 _HTTP_SCHEME = {"ws": "http", "wss": "https"}
+WEBSOCKET_MESSAGE_MAX_BYTES = 16 * 1024 * 1024
 
 
 async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.Timeout, mcp_server: bool,
@@ -238,8 +239,9 @@ async def relay_websocket(websocket: WebSocket, base_url: str, *, role: str, rol
     path, with the headers ``upstream_headers`` sends, asking for the subprotocols the client offered; `websocket` is
     accepted with the one the service chose and the headers its answer carried (a ``Set-Cookie`` among them, each
     field kept apart), but those the gateway's own answer writes. Each text and binary message is relayed as it came, and either side's
-    close, with its code, closes the other. A service that refuses the handshake has its answer relayed as the refusal;
-    one that never answers is a 502."""
+    close, with its code, closes the other; a message from the service larger than ``WEBSOCKET_MESSAGE_MAX_BYTES``, the
+    size uvicorn takes from a client, closes both with 1009 rather than be held whole. A service that refuses the
+    handshake has its answer relayed as the refusal; one that never answers is a 502."""
     try:
         target_url = upstream_url(base_url, websocket)
     except ValueError as e:
@@ -252,7 +254,7 @@ async def relay_websocket(websocket: WebSocket, base_url: str, *, role: str, rol
     try:
         upstream = await connect_websocket("ws" + target_url.removeprefix("http"), additional_headers=headers,
                                            subprotocols=offered or None, user_agent_header=None,
-                                           open_timeout=open_timeout, max_size=None)
+                                           open_timeout=open_timeout, max_size=WEBSOCKET_MESSAGE_MAX_BYTES)
     except InvalidStatus as e:
         answer = e.response
         await refuse_websocket(websocket, Response(content=answer.body or b"", status_code=answer.status_code,
@@ -310,8 +312,10 @@ async def _relay_messages(websocket: WebSocket, upstream: ClientConnection) -> N
         await asyncio.gather(*tasks, return_exceptions=True)
         await upstream.close()
         if WebSocketState.DISCONNECTED not in (websocket.client_state, websocket.application_state):
+            sent = upstream.protocol.close_sent
+            code = sent.code if sent is not None and sent.code == 1009 else upstream.close_code
             with contextlib.suppress(RuntimeError, OSError, ConnectionClosed):
-                await websocket.close(_sendable(upstream.close_code, abnormal=1011), upstream.close_reason or "")
+                await websocket.close(_sendable(code, abnormal=1011), upstream.close_reason or "")
 
 
 def _sendable(code: int | None, *, abnormal: int) -> int:

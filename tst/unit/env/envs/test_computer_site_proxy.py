@@ -438,6 +438,31 @@ async def test_dns_answers_a_sites_wildcard_name_with_loopback_and_passes_every_
 
 
 @pytest.mark.asyncio
+async def test_dns_passes_on_an_answer_larger_than_a_classic_datagram_whole():
+    class Nameserver(asyncio.DatagramProtocol):
+        def connection_made(self, transport):
+            self.transport = transport
+
+        def datagram_received(self, data, addr):
+            self.transport.sendto(data[:2] + b"\x81\x80" + data[4:] + b"\0" * 6000, addr)
+
+    loop = asyncio.get_running_loop()
+    upstream, _ = await loop.create_datagram_endpoint(Nameserver, local_addr=("127.0.0.1", 0))
+    resolver = site_proxy.Resolver(Config(user=None, sites=[], nameservers=["127.0.0.1"]))
+    answered = []
+    resolver.transport = type("Transport", (), {"sendto": lambda self, data, addr: answered.append(data)})()
+    query = _query("example.org", 16)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(site_proxy, "NAMESERVER_PORT", upstream.get_extra_info("sockname")[1])
+            await resolver._answer(query, None)
+    finally:
+        upstream.close()
+
+    assert [len(reply) for reply in answered] == [len(query) + 6000]
+
+
+@pytest.mark.asyncio
 async def test_dns_over_tcp_answers_a_sites_name_and_passes_every_other_question_on_over_tcp():
     passed = []
 

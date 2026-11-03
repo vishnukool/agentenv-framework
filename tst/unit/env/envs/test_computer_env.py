@@ -737,6 +737,23 @@ async def test_site_routing_with_no_website_deployed_or_outside_a_run_is_refused
 
 
 @pytest.mark.asyncio
+async def test_site_routing_on_a_disk_computer_is_refused_before_it_boots_and_a_container_form_is_kept(
+        base, driver, docker, boots, routes, monkeypatch):
+    from agent_env.env.envs.computer.env import ComputerEnv
+
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    container = ComputerEnv.deployable_builds(Env.get(env.id))
+    disk = [("disk", arch, build) for _, arch, build in container]
+    monkeypatch.setattr(ComputerEnv, "deployable_builds", lambda self, form=None: disk)
+    params = {"site_routing": True, "sites": [{"name": "a", "url": "http://gw/website/a/", "domains": ["a.test"]}]}
+
+    with pytest.raises(DeployRefused, match="a disk computer runs inside a launcher container"):
+        await Env.get(env.id).deploy(env_params=params)
+
+    assert boots.boots == [] and routes == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("env_params, problem", [
     ({"site_routing": True, "sites": [{"name": "a", "url": "http://gw/website/a/", "domains": ["x.test"]},
                                       {"name": "b", "url": "http://gw/website/b/", "domains": ["x.test"]}]},

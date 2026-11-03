@@ -51,6 +51,7 @@ CHUNK = 1 << 16
 UPSTREAM_TIMEOUT_S = 30.0
 DNS_TIMEOUT_S = 4.0
 NAMESERVER_PORT = 53
+DATAGRAM_MAX = 65535
 LISTEN_TIMEOUT_S = 15.0
 CHECK_TIMEOUT_S = 15.0
 FAILED = (("X-Agentenv-Site-Proxy", "failed"),)
@@ -476,7 +477,7 @@ class Resolver(asyncio.DatagramProtocol):
                 try:
                     await loop.sock_connect(sock, (nameserver, NAMESERVER_PORT))
                     await loop.sock_sendall(sock, data)
-                    return await asyncio.wait_for(loop.sock_recv(sock, 4096), DNS_TIMEOUT_S)
+                    return await asyncio.wait_for(loop.sock_recv(sock, DATAGRAM_MAX), DNS_TIMEOUT_S)
                 except (OSError, asyncio.TimeoutError):
                     continue
         return None
