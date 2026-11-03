@@ -99,6 +99,10 @@ agent-env env website put --id notes-site \
 Run it from the repo root. `environment_name` comes from the card, which the spec names `notes`. The stored env
 has a server image and no frontend image. Pass `--skip-validation` to register without deploying.
 
+To record what the site sends and receives, deploy it with `--capture-traffic` (or `"capture_traffic": true` on a
+task's `deploy_env` step): tcpdump runs in the server container's network namespace and the gateway serves its pcap
+files as `traffic/v1`, which a `collect_traffic_capture` step with the env's `env_id` stores as file artifacts.
+
 `env.toml` describes the same env for a bundle. Its keys are `type`, `spec` and `backend_image`; the env takes its
 `environment_name`, health path and domains from the spec. A bundle builds `backend_image` with this
 folder as the build context, but this Dockerfile needs the repo root. Until the protocol package is installed from a

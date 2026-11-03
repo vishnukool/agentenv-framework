@@ -51,7 +51,10 @@ DEFAULT_TTL_SECONDS = 10800  # 3 hours
 @click.option("--keyed-roles", is_flag=True, default=False,
               help="Draw a role key for the deploy: its gateway then believes a role other than default only from a "
                    "caller that sends the key beside it.")
-def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode: str, sandbox: str, service_db_env_id: str | None, gateway_env_id: str | None, website_browser_env_id: str | None, disk_size_gb: float, cpu: float | None, memory_mb: int | None, env_state_type: str | None, env_state_instance_id: str | None, keyed_roles: bool):
+@click.option("--capture-traffic", is_flag=True, default=False,
+              help="Record every packet the env's websites' containers send and receive, as rotating pcap files its "
+                   "gateway serves as traffic/v1 (VM deploys of website or multi envs only).")
+def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode: str, sandbox: str, service_db_env_id: str | None, gateway_env_id: str | None, website_browser_env_id: str | None, disk_size_gb: float, cpu: float | None, memory_mb: int | None, env_state_type: str | None, env_state_instance_id: str | None, keyed_roles: bool, capture_traffic: bool):
     """Deploy an MCP server environment."""
     from agent_env.providers import build_sandbox_provider
     from agent_env.config import get_config
@@ -94,6 +97,8 @@ def deploy(env_id: str, env_version: int | None, ttl_seconds: int, gateway_mode:
         click.echo(f"Env state instance id: {env_state_instance_id}")
     if keyed_roles:
         deploy_kwargs["keyed_roles"] = True
+    if capture_traffic:
+        deploy_kwargs["capture_traffic"] = True
     try:
         with run_scope(env.id):
             deployed_env = asyncio.run(env.deploy(**deploy_kwargs))
