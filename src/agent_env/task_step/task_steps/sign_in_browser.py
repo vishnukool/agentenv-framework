@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 LIVE_KEY = "live_websites"
 REPRODUCIBLE_KEY = "reproducible"
 SIGN_INS_KEY = "browser_sign_ins"
+_ERROR_CHARS = 500
 
 
 @dataclass(frozen=True)
@@ -156,8 +157,8 @@ async def sign_in(context: TaskStepContext, deployed: Any, *, users: Optional[di
                   sites: Optional[list[str]] = None, browser: Optional[str] = None, clear: bool = True,
                   timeout: int = 30) -> dict:
     """Sign ``deployed``'s browser in to its live websites (those named in ``sites``, else every one with a session),
-    each as ``users[name]`` or the site's own choice; with ``clear``, a site's old cookies go first. Returns the record
-    of what was set, cookies by everything but their values."""
+    each as ``users[name]`` or the site's own choice; with ``clear``, a site's old cookies go first, on a browser that
+    serves cookies/clear. Returns the record of what was set, cookies by everything but their values."""
     card = deployed.environment_card or {}
     live = {site.name: site for site in live_sites(card)}
     unknown = sorted(set(sites or []) - set(live))
@@ -188,7 +189,8 @@ async def sign_in(context: TaskStepContext, deployed: Any, *, users: Optional[di
         except ValueError as e:
             raise RuntimeError(f"live website {site.name!r}: its session returned {e}") from None
         try:
-            if clear and site.domains:
+            if clear and site.domains and protocol_v1.find_extension_method(target.card, BROWSER_EXTENSION_URI,
+                                                                            CLEAR_COOKIES) is not None:
                 await _invoke(deployed, target, BROWSER_EXTENSION_URI, CLEAR_COOKIES, {"domains": list(site.domains)},
                               timeout)
             await _invoke(deployed, target, BROWSER_EXTENSION_URI, SET_COOKIES,
@@ -225,7 +227,7 @@ async def sign_in_again(context: TaskStepContext, env_id: str) -> None:
                 context, deployed, users=users, sites=[s["name"] for s in entry["sites"]], browser=entry.get("browser"))
         except Exception as e:
             logger.warning("reset_env: signing env %s's browser in again failed: %s", env_id, e)
-            entry["error"] = str(e)[:500]
+            entry["error"] = str(e)[:_ERROR_CHARS]
 
 
 class SignInBrowserTaskStep(TaskStep):
@@ -272,7 +274,7 @@ class SignInBrowserTaskStep(TaskStep):
             record = await sign_in(context, deployed, users=self.users, sites=self.sites, browser=self.browser,
                                    timeout=self.timeout_seconds)
         except Exception as e:
-            context.metadata.setdefault(SIGN_INS_KEY, {})[self.id] = {"env_id": self.env_id, "error": str(e)[:500]}
+            context.metadata.setdefault(SIGN_INS_KEY, {})[self.id] = {"env_id": self.env_id, "error": str(e)[:_ERROR_CHARS]}
             logger.warning("sign_in_browser %s: %s", self.id, e)
             if self.fail_task_on_error:
                 raise

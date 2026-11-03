@@ -178,6 +178,28 @@ async def test_the_browser_is_signed_in_with_the_live_sites_session_and_no_value
     assert TOKEN not in json.dumps(context.to_safe_dict(), default=str) and TOKEN not in caplog.text
 
 
+@environment_card(name="playwright-mcp")
+class SetOnlyBrowser(AgentEnvEnvironment):
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    @extension(BROWSER_EXTENSION_URI, op="cookies/set")
+    async def _set(self, cookies: list[dict]) -> dict:
+        self.calls.append(("set", {"cookies": cookies}))
+        return {"set": len(cookies), "open_browser": False}
+
+
+@pytest.mark.asyncio
+async def test_a_browser_serving_only_cookies_set_is_signed_in_without_clearing(monkeypatch):
+    browser = SetOnlyBrowser()
+    gateway = _Gateway(browser)
+    monkeypatch.setattr(env_module.protocol_v1, "invoke_extension", gateway.invoke)
+    context = TaskStepContext(deployed_envs=[gateway.deployed()])
+    await SignInBrowserTaskStep(id="s", version=1, env_id="e1").execute(context)
+    assert [call for call, _ in browser.calls] == ["set"]
+    assert context.metadata[SIGN_INS_KEY]["s"]["sites"][0]["name"] == "github"
+
+
 @pytest.mark.asyncio
 async def test_a_browser_that_refuses_fails_the_step_without_the_value(monkeypatch, caplog):
     browser = Browser(refuse=True)

@@ -40,6 +40,7 @@ import io
 import re
 import sys
 import uuid
+import zlib
 from collections import deque
 from html.parser import HTMLParser
 from pathlib import Path
@@ -206,7 +207,33 @@ def _http_response(block: bytes) -> tuple[int, tuple[tuple[str, str], ...], byte
     if any(n.lower() == "transfer-encoding" and "chunked" in v.lower() for n, v in headers):
         body = _dechunked(body)
         headers = tuple((n, v) for n, v in headers if n.lower() != "transfer-encoding")
-    return status, headers, body
+    return status, *_decoded(headers, body)
+
+
+_DECODERS = {"gzip": zlib.MAX_WBITS | 16, "x-gzip": zlib.MAX_WBITS | 16, "deflate": zlib.MAX_WBITS}
+
+
+def _decoded(headers: tuple[tuple[str, str], ...], body: bytes) -> tuple[tuple[tuple[str, str], ...], bytes]:
+    """``body`` with its ``Content-Encoding`` undone and that header dropped, as a capture of this module stores it, so
+    a page imported from another WARC tool is rewritten too; a coding it can't undo (``br``, say) leaves both as they
+    are, and a body that expands past ``MAX_CAPTURE_BYTES`` is refused."""
+    codings = [c.strip().lower() for n, v in headers if n.lower() == "content-encoding" for c in v.split(",")]
+    codings = [c for c in codings if c and c != "identity"]
+    if not codings or any(c not in _DECODERS for c in codings):
+        return headers, body
+    for coding in reversed(codings):
+        inflater = zlib.decompressobj(_DECODERS[coding])
+        try:
+            expanded = inflater.decompress(body, MAX_CAPTURE_BYTES + 1)
+        except zlib.error:
+            if coding != "deflate":
+                return headers, body
+            inflater = zlib.decompressobj(-zlib.MAX_WBITS)
+            expanded = inflater.decompress(body, MAX_CAPTURE_BYTES + 1)
+        if len(expanded) > MAX_CAPTURE_BYTES or inflater.unconsumed_tail:
+            raise ValueError(f"a captured answer is over {MAX_CAPTURE_BYTES} bytes decoded")
+        body = expanded
+    return tuple((n, v) for n, v in headers if n.lower() not in ("content-encoding", "content-length")), body
 
 
 def _dechunked(body: bytes) -> bytes:
@@ -256,7 +283,8 @@ class WarcWriter:
 
 
 class _Links(HTMLParser):
-    """The links of an HTML page: ``pages`` its anchors and frames lead to, ``assets`` what it loads to show."""
+    """The links of an HTML page: ``pages`` its anchors and frames lead to, ``assets`` what it loads to show, a
+    video's ``poster`` and the CSS URLs of its ``style`` values and ``<style>`` elements among them."""
 
     _ASSET_RELS = {"stylesheet", "icon", "shortcut", "preload", "modulepreload", "manifest", "apple-touch-icon"}
 
@@ -265,9 +293,15 @@ class _Links(HTMLParser):
         self.pages: list[str] = []
         self.assets: list[str] = []
         self.base: Optional[str] = None
+        self.in_style = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
         a = {k: v for k, v in attrs if v}
+        self.in_style = tag == "style"
+        if "style" in a:
+            self._css(a["style"])
+        if tag == "video" and "poster" in a:
+            self.assets.append(a["poster"])
         if tag == "base" and "href" in a and self.base is None:
             self.base = a["href"]
         elif tag in ("a", "area") and "href" in a:
@@ -281,6 +315,16 @@ class _Links(HTMLParser):
             self.assets.append(a["src"])
         if "srcset" in a:
             self.assets += [item.strip().split(" ")[0] for item in a["srcset"].split(",") if item.strip()]
+
+    def handle_endtag(self, tag: str) -> None:
+        self.in_style = False
+
+    def handle_data(self, data: str) -> None:
+        if self.in_style:
+            self._css(data)
+
+    def _css(self, css: str) -> None:
+        self.assets += [href for match in _CSS_URL.finditer(css) if (href := match["url"] or match["imported"])]
 
 
 def site_of(url: str) -> str:

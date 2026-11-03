@@ -11,6 +11,7 @@ import importlib.util
 import io
 import sys
 import threading
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -434,6 +435,59 @@ def test_a_capture_follows_a_stylesheets_imports_and_assets_on_the_site():
         assert capture([site.url + "/"], limited, depth=0, max_requests=3).captured == 3
     finally:
         site.close()
+
+
+class _InlineStyledSite(_Site):
+    """A page naming its assets only in a ``style`` value, a ``<style>`` element and a video's ``poster``."""
+
+    PAGES = {
+        "/": (200, "text/html", b'<style>@import "/t.css"; h1{background:url(/h.png)}</style>'
+                                b'<div style="background:url(\'/d.png\')"></div><video poster="/p.jpg"></video>'
+                                b'<i style="background:url(data:image/png;base64,AA)"></i>'),
+        "/t.css": (200, "text/css", b"p{}"),
+        "/h.png": (200, "image/png", b"\x89PNG"),
+        "/d.png": (200, "image/png", b"\x89PNG"),
+        "/p.jpg": (200, "image/jpeg", b"\xff\xd8"),
+    }
+
+
+def test_a_capture_loads_what_a_pages_style_values_style_elements_and_posters_name():
+    site = _InlineStyledSite()
+    try:
+        out = io.BytesIO()
+        result = capture([site.url + "/"], out, depth=0)
+        assert {key[1] for key in Archive.read(out.getvalue()).entries} == {"/", "/t.css", "/h.png", "/d.png", "/p.jpg"}
+        assert result.captured == 5 and not result.failed
+    finally:
+        site.close()
+
+
+def test_an_imported_warcs_compressed_page_is_read_decoded_so_its_links_stay_on_the_replay(tmp_path):
+    page = b'<a href="/a">a</a><link rel="stylesheet" href="https://shop.example/s.css">'
+    css = b"b{background:url(/b.png)}"
+    records = b""
+    for url, kind, body, coding in (("https://shop.example/", "text/html", gzip.compress(page), "gzip"),
+                                    ("https://shop.example/s.css", "text/css", zlib.compress(css), "deflate")):
+        http = (f"HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Encoding: {coding}\r\n"
+                f"Content-Length: {len(body)}\r\n\r\n").encode() + body
+        records += (f"WARC/1.0\r\nWARC-Type: response\r\nWARC-Target-URI: {url}\r\n"
+                    f"Content-Type: application/http;msgtype=response\r\nContent-Length: {len(http)}\r\n\r\n"
+                    ).encode() + http + b"\r\n\r\n"
+    (tmp_path / "other.warc").write_bytes(records)
+    site = TestClient(Shop(tmp_path / "other.warc").create_app())
+    behind = {"X-Forwarded-Prefix": "/website/shop"}
+    served = site.get("/", headers=behind)
+    assert "content-encoding" not in served.headers
+    assert served.content == b'<a href="/website/shop/a">a</a><link rel="stylesheet" href="/website/shop/s.css">'
+    assert site.get("/s.css", headers=behind).content == b"b{background:url(/website/shop/b.png)}"
+
+
+def test_an_imported_answer_in_a_coding_the_replay_cant_undo_is_served_as_captured():
+    http = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: br\r\n\r\n\x0b\x02\x80"
+    record = (f"WARC/1.0\r\nWARC-Type: response\r\nWARC-Target-URI: https://shop.example/\r\n"
+              f"Content-Type: application/http;msgtype=response\r\nContent-Length: {len(http)}\r\n\r\n").encode()
+    entry = Archive.read(record + http + b"\r\n\r\n").find("GET", "/")
+    assert entry.body == b"\x0b\x02\x80" and ("Content-Encoding", "br") in entry.headers
 
 
 def test_a_replay_drops_a_link_tags_integrity_so_its_rewritten_stylesheet_still_loads():
