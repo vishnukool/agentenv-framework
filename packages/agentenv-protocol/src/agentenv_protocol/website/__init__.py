@@ -6,17 +6,22 @@ that meets the contract works, which ``python -m agentenv_protocol.website.confo
 is ready is its ``WebsiteReadiness`` answer to ``ready``, which ``website_readiness`` reads of one site and
 ``env_readiness`` of every site of an env. What a task left a site with is its data plane's ``data/get``. A site's pages
 can call its API with ``client/site-client.js``, a dependency-free ES module (with its ``.d.ts``) to copy into them:
-``api()``, ``universeNow()`` from ``X-Universe-Now``, ``session()``, ``signIn()`` and ``signOut()``."""
+``api()``, ``universeNow()`` from ``X-Universe-Now``, ``session()``, ``signIn()`` and ``signOut()``. A live site,
+``@website(domains=[...], live=True, allow_hosts=[...])``, serves none of its pages and signs a browser in with
+``@session``; ``agentenv_protocol.website.replay`` captures a real site and serves the capture as ``ReplayWebsite``."""
 
 from __future__ import annotations
 
+from .browser import BROWSER_EXTENSION_URI, CLEAR_COOKIES, SET_COOKIES, Cookie
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, UniverseClock
 from .environment import (
     DEFAULT_HEALTH_PATH,
     SESSION_PATH,
     WebsiteDeclaration,
     WebsiteEnvironment,
+    host_problem,
     ready_check,
+    session,
     website,
 )
 from .errors import ApiError, BadRequest, Conflict, Forbidden, NotFound, Unauthorized
@@ -27,7 +32,8 @@ from .spec import NameTable, SpecError, WebsiteSpec, from_card, from_environment
 from .store import Collections
 
 __all__ = [
-    "WebsiteEnvironment", "WebsiteDeclaration", "website", "api", "ApiContext", "ApiRoute", "ready_check",
+    "WebsiteEnvironment", "WebsiteDeclaration", "website", "api", "ApiContext", "ApiRoute", "ready_check", "session",
+    "host_problem", "Cookie", "BROWSER_EXTENSION_URI", "SET_COOKIES", "CLEAR_COOKIES",
     "ApiError", "BadRequest", "Unauthorized", "Forbidden", "NotFound", "Conflict",
     "Collections", "UniverseClock", "SessionSigner", "reserved_path",
     "WebsiteSpec", "SpecError", "NameTable", "load_spec", "from_card", "from_environment", "name_table",

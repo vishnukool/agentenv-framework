@@ -2,7 +2,12 @@
 screencast frames, on a card and port of its own beside the MCP server. It is idle until a recording starts, which
 finds the browser through the remote debugging port Playwright opens for an ``--isolated`` Chromium and follows the
 page the agent is on. It runs standalone in the browser's image, so it imports only
-``agentenv-framework-protocol[computer]`` and, to talk to the browser, ``websockets``."""
+``agentenv-framework-protocol[computer]`` and, to talk to the browser, ``websockets``.
+
+The same card serves browser/v1's ``cookies/set`` and ``cookies/clear``, so a step can start the browser signed in to
+a site. Playwright MCP starts each browser context it opens from the storage state file ``--storage-state`` names
+(``PLAYWRIGHT_STORAGE_STATE``), and launches its browser only at the agent's first tool call, so the cookies go into
+that file, and through DevTools into every context of a browser already running."""
 from __future__ import annotations
 
 import asyncio
@@ -30,6 +35,10 @@ from agentenv_protocol.agent_env_environment import (
 )
 from agentenv_protocol.computer.card import COMPUTER_RECORDING
 from agentenv_protocol.computer.recording import RecordedFrame, RecordHints, Recording, Recordings, recording_params
+from agentenv_protocol.errors import AgentEnvError
+from agentenv_protocol.website.browser import (BROWSER_EXTENSION_URI, CLEAR_COOKIES, SET_COOKIES, Cookie,
+                                                devtools, domain_matches, storage_state)
+from agentenv_protocol.website.browser import cookies as parse_cookies
 
 logger = logging.getLogger("playwright-mcp-recorder")
 
@@ -43,6 +52,7 @@ HOLD_S = 1.0
 #: How long one DevTools command may take.
 CALL_S = 10.0
 JPEG_QUALITY = 80
+DEFAULT_STORAGE_STATE = "/app/storage-state.json"
 
 
 class CdpError(Exception):
@@ -222,16 +232,106 @@ class Screencast:
             self._session = session
 
 
+class BrowserCookies:
+    """browser/v1's cookies: kept in the storage state file each new browser context starts from, and set in, or
+    cleared from, every context of the browser that is running, if one is. One change runs at a time, its file
+    write and DevTools calls together, so a concurrent set or clear never restores what another removed."""
+
+    def __init__(self, path: Path, find: Callable[[], Optional[int]],
+                 connect: Callable[[int], AsyncContextManager[Cdp]]) -> None:
+        self.path, self._find, self._connect = path, find, connect
+        self._lock = asyncio.Lock()
+
+    async def set(self, given: list[Cookie]) -> dict:
+        async with self._lock:
+            return await self._set(given)
+
+    async def clear(self, domains: Optional[list[str]]) -> dict:
+        async with self._lock:
+            return await self._clear(domains)
+
+    async def _set(self, given: list[Cookie]) -> dict:
+        kept = {c.key(): c for c in self._read()}
+        kept.update({c.key(): c for c in given})
+        self._write(list(kept.values()))
+
+        async def add(cdp: Cdp, context: dict) -> None:
+            await cdp.call("Storage.setCookies", {"cookies": devtools(given), **context})
+
+        return {"set": len(given), "open_browser": await self._each_context(add)}
+
+    async def _clear(self, domains: Optional[list[str]]) -> dict:
+        before = self._read()
+        kept = [c for c in before if domains is not None and not c.matches(domains)]
+        self._write(kept)
+
+        async def remove(cdp: Cdp, context: dict) -> None:
+            current = [] if domains is None else (await cdp.call("Storage.getCookies", context)).get("cookies") or []
+            await cdp.call("Storage.clearCookies", context)
+            others = [_settable(c) for c in current if not domain_matches(c.get("domain", ""), domains or [])]
+            if others:
+                await cdp.call("Storage.setCookies", {"cookies": others, **context})
+
+        return {"cleared": len(before) - len(kept), "open_browser": await self._each_context(remove)}
+
+    async def _each_context(self, act: Callable[[Cdp, dict], Any]) -> bool:
+        """``act`` on the default context and each other one of the running browser; False when none runs. An error
+        names the DevTools call's kind only, since its message may repeat a cookie."""
+        port = await asyncio.to_thread(self._find)
+        if port is None:
+            return False
+        try:
+            async with self._connect(port) as cdp:
+                contexts = (await cdp.call("Target.getBrowserContexts")).get("browserContextIds") or []
+                for context in [{}, *({"browserContextId": c} for c in contexts)]:
+                    await act(cdp, context)
+        except (OSError, CdpError, httpx.HTTPError, KeyError, ValueError, asyncio.TimeoutError) as e:
+            raise AgentEnvError("browser_unreachable", f"the running browser didn't take the change "
+                                f"({type(e).__name__}); the next context it opens starts with it", applied="unknown",
+                                status=502) from None
+        return True
+
+    def _read(self) -> list[Cookie]:
+        try:
+            state = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
+        return [Cookie.model_validate({**c, "expires": None if c.get("expires", -1) in (-1, None) else c["expires"]})
+                for c in state.get("cookies") or []]
+
+    def _write(self, kept: list[Cookie]) -> None:
+        try:
+            origins = json.loads(self.path.read_text(encoding="utf-8")).get("origins") or []
+        except (FileNotFoundError, ValueError):
+            origins = []
+        staged = self.path.with_name(self.path.name + ".tmp")
+        staged.write_text(json.dumps({"cookies": storage_state(kept), "origins": origins}), encoding="utf-8")
+        os.chmod(staged, 0o600)
+        os.replace(staged, self.path)
+
+
+def _settable(cookie: dict) -> dict:
+    """A cookie DevTools listed, as ``Storage.setCookies`` takes it back."""
+    param = {k: cookie[k] for k in ("name", "value", "domain", "path", "secure", "httpOnly", "sameSite") if k in cookie}
+    if not cookie.get("session", False) and cookie.get("expires", -1) not in (-1, None):
+        param["expires"] = cookie["expires"]
+    return param
+
+
 @environment_card(name="playwright-mcp")
 class BrowserRecorder(AgentEnvEnvironment):
-    """computer-recording/v1 of the Playwright MCP browser's page; the browser's tools stay Playwright MCP's."""
+    """computer-recording/v1 of the Playwright MCP browser's page, and browser/v1's cookies; the browser's tools stay
+    Playwright MCP's."""
 
     recording = Recording()
 
     def __init__(self, find: Callable[[], Optional[int]] = find_browser,
-                 connect: Callable[[int], AsyncContextManager[Cdp]] = connect_cdp) -> None:
+                 connect: Callable[[int], AsyncContextManager[Cdp]] = connect_cdp,
+                 storage_state_path: Optional[Path] = None) -> None:
         self._find, self._connect = find, connect
         self.recordings = Recordings(_Host(self))
+        path = storage_state_path or Path(os.environ.get("PLAYWRIGHT_STORAGE_STATE", DEFAULT_STORAGE_STATE))
+        self.cookies = BrowserCookies(path, find, connect)
 
     def extension_params(self, uri: str) -> dict:
         if uri == COMPUTER_RECORDING:
@@ -249,6 +349,21 @@ class BrowserRecorder(AgentEnvEnvironment):
     @extension(COMPUTER_RECORDING, op="end")
     async def _recording_end(self, recording_id: str, upload: Optional[dict] = None, reason: str = "end") -> dict:
         return await self.recordings.end(recording_id, upload, reason)
+
+    @extension(BROWSER_EXTENSION_URI, op=SET_COOKIES,
+               description="The browser's cookies, for agentenv's steps, never its agent: cookies/set adds cookies "
+                           "(name, value, domain, path, secure, httpOnly, expires, sameSite) to every context, open "
+                           "and to come, and cookies/clear removes those of some domains, or all of them.")
+    async def _cookies_set(self, cookies: list[dict]) -> dict:
+        try:
+            given = parse_cookies(cookies)
+        except ValueError as e:
+            raise AgentEnvError("invalid_params", str(e)) from None
+        return await self.cookies.set(given)
+
+    @extension(BROWSER_EXTENSION_URI, op=CLEAR_COOKIES)
+    async def _cookies_clear(self, domains: Optional[list[str]] = None) -> dict:
+        return await self.cookies.clear(domains)
 
     async def frames(self, hints: RecordHints) -> AsyncIterator[RecordedFrame]:
         """The page at up to ``fps``: a frame each time it changes, and the last one again after ``HOLD_S``."""

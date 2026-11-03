@@ -3,6 +3,10 @@ built before the server image held its pages may still name a separate frontend 
 env.toml may carry the site's website spec, ``spec = "website.toml"`` or an inline ``[spec]`` table, whose site name,
 health path and domains the env takes.
 
+Its ``settings`` are environment variables of the server's container, a live site's credentials among them: a setting
+whose name reads as a secret's (a token, a password, ...) is stored as a ``secret:KEY`` or ``env:NAME`` reference,
+never its value, and resolved from the deploying user's config only when the container is written.
+
 A deploy reads whether the site is ready from its env card, the protocol layer: ``website/v1``'s ``ready``, as
 ``computer-app/v1``'s says of an app. ``health_path`` (env.toml's ``health``) is read only for a site whose card has no
 ``ready``, or that serves no card, and is deprecated."""
@@ -46,6 +50,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HEALTH_PATH = AGENT_ENV_WEBSITE_HEALTH_PATH
 _HEALTH_PATH = re.compile(r"/[A-Za-z0-9._~/-]*")
+_SETTING_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+RESERVED_SETTINGS = frozenset({"DATABASE_URL", "SERVICE_NAME", "ENVIRONMENT_NAME", "PORT", "PYTHONUNBUFFERED",
+                               "WEBSITE_ROLE_KEY"})
 
 
 class WebsiteEnv(Env):
@@ -55,7 +62,8 @@ class WebsiteEnv(Env):
                                                   EntityRef.artifact("frontend_image", artifact_type="docker_image",
                                                                      optional=True))
     toml_keys: ClassVar[dict[str, type]] = {"backend_image": object, "frontend_image": object, "environment_name": str,
-                                            "health": str, "env_provider_type": str, "spec": object}
+                                            "health": str, "env_provider_type": str, "spec": object,
+                                            "settings": dict}
 
     def __init__(
         self,
@@ -70,6 +78,7 @@ class WebsiteEnv(Env):
         metadata: Optional[dict[str, str]] = None,
         env_provider_type: str = "gateway",
         domains: tuple[str, ...] | list[str] = (),
+        settings: Optional[dict[str, str]] = None,
     ):
         super().__init__(id, version, metadata=metadata)
         if not environment_name:
@@ -85,6 +94,9 @@ class WebsiteEnv(Env):
             raise ValueError(f"website env {id!r}: {problem}")
         self.health_path = health_path
         self.domains = tuple(domains)
+        if problems := settings_problems(settings or {}):
+            raise ValueError(f"website env {id!r}: {'; '.join(problems)}")
+        self.settings = dict(settings or {})
         self.environment_name = environment_name
         self.env_provider_type = env_provider_type
         self._sandbox = None
@@ -117,6 +129,8 @@ class WebsiteEnv(Env):
         base["service_name"] = self.environment_name
         base["environment_name"] = self.environment_name  # dual-write with service_name during the rename
         base["env_provider_type"] = self.env_provider_type
+        if self.settings:
+            base["settings"] = dict(self.settings)
         return base
 
     @classmethod
@@ -134,6 +148,7 @@ class WebsiteEnv(Env):
             metadata=data.get("metadata", {}),
             env_provider_type=data.get("env_provider_type", "gateway"),
             domains=data.get("domains", ()),
+            settings=data.get("settings"),
         )
 
     @classmethod
@@ -157,7 +172,7 @@ class WebsiteEnv(Env):
                        environment_name=fields["environment_name"],
                        health_path=fields.get("health", DEFAULT_HEALTH_PATH),
                        env_provider_type=fields["env_provider_type"],
-                       domains=fields.get("domains", ()))
+                       domains=fields.get("domains", ()), settings=fields.get("settings"))
 
     def to_toml(self, out: ExportContext) -> dict:
         """The env.toml of a folder this env's images are built from, which ``from_toml`` reads back as it."""
@@ -169,6 +184,8 @@ class WebsiteEnv(Env):
             toml["health"] = self.health_path
         if self.domains:
             toml["spec"] = {"site": {"domains": list(self.domains)}}
+        if self.settings:
+            toml["settings"] = dict(self.settings)
         return {**toml, **self.provider_toml(out, self.env_provider_type)}
 
     @classmethod
@@ -185,6 +202,9 @@ class WebsiteEnv(Env):
         health = data.get("health", DEFAULT_HEALTH_PATH)
         if isinstance(health, str) and (problem := health_path_problem(health)):
             ctx.refuse([ctx.config_problem(problem)])
+        settings = data.get("settings")
+        if isinstance(settings, dict) and (problems := settings_problems(settings)):
+            ctx.refuse([ctx.config_problem(problem) for problem in problems])
         fields = ctx.accept_env(data, cls, named_by="backend_image")
         if spec is not None and spec.site.domains:
             fields["domains"] = spec.site.domains
@@ -433,6 +453,27 @@ def website_spec_of(data: dict, folder: Path) -> tuple[Optional[WebsiteSpec], li
         if ours is not None and key in data and data[key] != ours:
             problems.append(f"{key} {data[key]!r} isn't the spec's {ours!r}")
     return spec, problems
+
+
+def settings_problems(settings: dict) -> list[str]:
+    """Why ``settings`` can't be a website env's, each problem naming the setting and never its value: a name is an
+    environment variable's the gateway doesn't set itself, a value a string, and a secret's a bare ``secret:KEY`` or
+    ``env:NAME`` reference."""
+    from agent_env.config.describe import is_secret_key
+    from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX
+
+    problems = []
+    for name, value in settings.items():
+        if not isinstance(name, str) or not _SETTING_NAME.fullmatch(name) or name in RESERVED_SETTINGS:
+            problems.append(f"settings.{name}: a setting is an environment variable's name the gateway doesn't set "
+                            f"itself ({', '.join(sorted(RESERVED_SETTINGS))} are its own)")
+        elif not isinstance(value, str):
+            problems.append(f"settings.{name} is a string, not a {type(value).__name__}")
+        elif is_secret_key(name) and not (value.startswith((SECRET_REF_PREFIX, ENV_REF_PREFIX)) and "?" not in value
+                                          and value not in (SECRET_REF_PREFIX, ENV_REF_PREFIX)):
+            problems.append(f"settings.{name} is a secret, so it takes a {SECRET_REF_PREFIX}KEY or {ENV_REF_PREFIX}NAME "
+                            "reference with no ?default, not its value")
+    return problems
 
 
 def health_path_problem(health_path: str) -> str | None:

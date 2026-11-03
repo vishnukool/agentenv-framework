@@ -8,7 +8,13 @@ data plane loads, exports and resets it, and ``data/get`` is how agentenv reads 
 
 One route is built in, replaced by a site's own ``@api`` route at its very path and answering before one whose path
 parameters would also match it: ``/api/session``, which a frontend calls to learn who is signed in, signing the acting
-user in when nobody is (GET), or to sign out (DELETE)."""
+user in when nobody is (GET), or to sign out (DELETE).
+
+A live site, ``@website(domains=[...], live=True, allow_hosts=[...])``, is a real site on the internet: its server serves
+no pages and no API, only its health path, the data plane and the card. Its data hooks reach the site through what is
+known of it (its API, or scripted steps), its ``@session`` method returns the cookies a browser adds to start signed in,
+and its credentials are settings, read with ``self.setting(name)``. ``allow_hosts`` names the hosts beyond its domains
+its pages load from (APIs, CDNs, sign-in), which a computer's network allowlist lets through."""
 from __future__ import annotations
 
 import inspect
@@ -39,7 +45,9 @@ from ..agent_env_environment import (
     get_data,
     reset_data,
 )
+from ..errors import AgentEnvError
 from ..types import DataPart
+from .browser import cookies as parse_cookies
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, UniverseClock, clock_patch_script, iso
 from .database import ModelState, Sessions, Tables, is_hooks, metadata_of
 from .errors import NotFound
@@ -54,14 +62,17 @@ from .store import Collections
 _WEBSITE_ATTR = "_aee_website"
 _READY_ATTR = "_aee_website_ready"
 _DEFAULT_HOOK_ATTR = "_aee_default_store_hook"
+_SESSION_ATTR = "_aee_website_session"
 _DEFAULT_HOOKS = {"reset_data": "_store_reset", "add_data": "_store_add", "get_data": "_store_get"}
 _HEAD = re.compile(rb"<head[^>]*>", re.IGNORECASE)
+_HOST = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*")
 
 
 class WebsiteDeclaration(NamedTuple):
     """What ``@website`` declares: the site's domains, its static folder and seed data file (relative to the class's
     file), its health path, whether its HTML pages read the universe's time, the models whose database keeps its state
-    instead of the default store, and the spec it was declared from."""
+    instead of the default store, the spec it was declared from, and for a live site, ``live`` and the other hosts its
+    pages reach."""
 
     domains: tuple[str, ...] = ()
     static: Optional[str] = None
@@ -70,34 +81,53 @@ class WebsiteDeclaration(NamedTuple):
     data: Optional[str] = None
     models: Any = None
     spec: Optional[WebsiteSpec] = None
+    live: bool = False
+    allow_hosts: tuple[str, ...] = ()
 
 
 def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = (), static: str | None = None,
             health: str = DEFAULT_HEALTH_PATH, clock_patch: bool = False, data: str | None = None,
-            models: Any = None, spec: str | Path | WebsiteSpec | None = None) -> Any:
+            models: Any = None, spec: str | Path | WebsiteSpec | None = None, live: bool = False,
+            allow_hosts: list[str] | tuple[str, ...] = ()) -> Any:
     """Declare a WebsiteEnvironment's site. ``data`` names a JSON file the default store starts with; ``models``
     keeps the site's data in a database instead, an MCP server's (see ``website.database``), and the site's
     data plane is that database's. With ``spec``, a website spec file (relative to the class's file) or a loaded one,
     the site is the spec's, and the class must serve what it declares; the other arguments but ``models`` are then
-    the spec's to give."""
+    the spec's to give. ``live`` declares a real site at ``domains``, which serves its own pages, and ``allow_hosts``
+    the hosts beyond them its pages reach."""
     if _cls is not None:
         raise TypeError("use @website(...) with parentheses")
     if spec is not None and (domains or static is not None or health != DEFAULT_HEALTH_PATH or clock_patch
-                             or data is not None):
+                             or data is not None or live or allow_hosts):
         raise TypeError("@website(spec=...) takes the site from its spec; set domains, health, assets, seed and "
-                        "clock there")
+                        "clock there, and a spec's site is a synthetic one")
     if not health.startswith("/") or health == "/" or reserved_path(health):
         raise ValueError(f"health is a path of its own under '/', not {health!r}")
     if models is not None and data is not None:
         raise ValueError("data= seeds the default store; a site of models= is seeded through data/add")
     if models is not None and not is_hooks(models):
         metadata_of(models)
+    for label, hosts in (("domains", domains), ("allow_hosts", allow_hosts)):
+        if isinstance(hosts, str):
+            raise ValueError(f"{label} is a list of host names, not the string {hosts!r}")
+        if problems := [problem for host in hosts if (problem := host_problem(host))]:
+            raise ValueError(f"{label}: {problems[0]}")
+    if live and not domains:
+        raise ValueError("a live site names its domains")
+    if live and (static is not None or data is not None or clock_patch):
+        raise ValueError("a live site serves none of its pages, so it takes no static, data or clock_patch")
+    if allow_hosts and not live:
+        raise ValueError("allow_hosts is for a live site: a synthetic site's pages reach only the sites of its env")
 
     def deco(cls: type) -> type:
         if not (isinstance(cls, type) and issubclass(cls, WebsiteEnvironment)):
             raise TypeError(f"@website declares a WebsiteEnvironment subclass, not {cls!r}")
+        if live and (served := routes_of(cls)):
+            raise ValueError(f"{cls.__name__} is a live site, whose API is the real site's: it serves no @api "
+                             f"route, not {served[0].name}")
         if spec is None:
-            setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(tuple(domains), static, health, clock_patch, data, models))
+            setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(tuple(domains), static, health, clock_patch, data, models,
+                                                           live=live, allow_hosts=tuple(allow_hosts)))
         else:
             declared = spec if isinstance(spec, WebsiteSpec) else load(cls._site_path(str(spec)))
             if models is not None and declared.data.seed:
@@ -114,6 +144,23 @@ def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = 
         return cls
 
     return deco
+
+
+def host_problem(host: Any) -> str | None:
+    """Why ``host`` isn't a host name a site or an allowlist names, None when it is: a name like ``github.com``, or
+    ``*.github.com`` for its subdomains, with no scheme, port or path."""
+    if not isinstance(host, str) or not _HOST.fullmatch(host):
+        return f"{host!r} is not a host name such as example.com or *.example.com"
+    return None
+
+
+def session(fn: Any) -> Any:
+    """Mark the method that signs a browser in: called with the ``user`` to sign in as (None for the site's own
+    choice), it returns the cookies a browser adds, a list of ``{name, value, domain, path, secure, httpOnly, expires,
+    sameSite}``, or ``{"cookies": [...], "expires_at": ...}``. A cookie without a domain is for the site's first
+    domain. website/v1's ``session`` operation calls it; a live site needs one to start signed in."""
+    setattr(fn, _SESSION_ATTR, True)
+    return fn
 
 
 def ready_check(fn: Any) -> Any:
@@ -208,6 +255,11 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         None when it named none. ``now()`` is UTC either way."""
         return self._clock().timezone
 
+    def setting(self, name: str, default: str | None = None) -> str | None:
+        """The site's setting ``name``, as its deploy passes it: an environment variable of the server's, which a
+        website env's ``settings`` set, a secret among them resolved from its ``secret:`` reference at deploy."""
+        return os.environ.get(name, default)
+
     def acting_user(self) -> str | None:
         """Who a browser with no session is signed in as: the store's ``current_user``, or the one a models site's data
         named, unless a site says else."""
@@ -232,7 +284,7 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         asgi = Starlette(middleware=[Middleware(_Forwarded), Middleware(_Universe, env=self)])
         AgentEnvStarletteApplication(self._build_card(), self).add_routes_to_app(asgi)
         asgi.router.routes.append(Route(declaration.health, self._health, methods=["GET"]))
-        if SESSION_PATH not in taken:
+        if SESSION_PATH not in taken and not declaration.live:
             asgi.router.routes.append(Route(SESSION_PATH, self._session, methods=["GET", "DELETE"]))
         asgi.router.routes.extend(Route(r.path, _unreserved(endpoint(getattr(self, r.fn.__name__), r, self.context)),
                                         methods=[r.method]) for r in api_routes)
@@ -258,10 +310,15 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         converters and all (``/files/{rest:path}``), so a gateway matches the requests it answers, nested paths
         included; a spec names a path by its template."""
         if uri == WEBSITE_EXTENSION_URI:
+            declaration = self.declaration()
             params = {**self.site_spec().to_card_extension(), "session_cookie": self.session_cookie,
                       "session_path": SESSION_PATH}
             served = {r.name: r.path for r in self.routes()}
             params["routes"] = [{**r, "path": served.get(r["name"], r["path"])} for r in params["routes"]]
+            if declaration.live:
+                params.update(live=True, allow_hosts=list(declaration.allow_hosts),
+                              signs_in=self._session_hook() is not None)
+                del params["session_cookie"], params["session_path"]
             return params
         return super().extension_params(uri)
 
@@ -304,8 +361,23 @@ class WebsiteEnvironment(AgentEnvEnvironment):
 
     @extension(WEBSITE_EXTENSION_URI, op="session")
     async def _website_session(self, user: Optional[str] = None) -> dict:
-        cookie = self._session_signer().cookie(user)
-        return {"user": user, "cookies": [cookie], "expires_at": expires_at(cookie["expires"])}
+        hook = self._session_hook()
+        if hook is None:
+            if self.declaration().live:
+                raise AgentEnvError("no_session", f"{type(self).__name__} is a live site with no @session method, so "
+                                    "it can't sign a browser in", status=501)
+            cookie = self._session_signer().cookie(user)
+            return {"user": user, "cookies": [cookie], "expires_at": expires_at(cookie["expires"])}
+        result = await _maybe_await(hook(user))
+        given, until = (result.get("cookies"), result.get("expires_at")) if isinstance(result, dict) else (result, None)
+        domains = self.declaration().domains
+        try:
+            signed = parse_cookies(given, default_domain=domains[0] if domains else None)
+        except ValueError as e:
+            raise AgentEnvError("invalid_session", f"{hook.__name__} returned {e}", status=500) from None
+        if until is None and (ends := [c.expires for c in signed if c.expires is not None]):
+            until = expires_at(int(min(ends)))
+        return {"user": user, "cookies": [c.model_dump(exclude_none=True) for c in signed], "expires_at": until}
 
     @reset_data
     async def _store_reset(self) -> None:
@@ -341,6 +413,12 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         return context.apply(JSONResponse({"user": context.user, "role": context.role,
                                            "signed_in": context.user is not None}))
 
+    def _session_hook(self) -> Any:
+        hooks = [member for member, _marker in _marked_members(self, _SESSION_ATTR)]
+        if len(hooks) > 1:
+            raise TypeError(f"{type(self).__name__} marks {len(hooks)} methods @session; a site signs in one way")
+        return hooks[0] if hooks else None
+
     def _clock(self) -> UniverseClock:
         if not hasattr(self, "clock"):
             raise TypeError(f"{type(self).__qualname__}.__init__ must call super().__init__()")
@@ -357,8 +435,14 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         return given if given.is_absolute() else Path(inspect.getfile(cls)).resolve().parent / given
 
 
+def default_store_hook(fn: Any) -> Any:
+    """Mark a data hook as one a subclass's own hook of that operation replaces, as it replaces the default store's."""
+    setattr(fn, _DEFAULT_HOOK_ATTR, True)
+    return fn
+
+
 for _hook in _DEFAULT_HOOKS.values():
-    setattr(getattr(WebsiteEnvironment, _hook), _DEFAULT_HOOK_ATTR, True)
+    default_store_hook(getattr(WebsiteEnvironment, _hook))
 
 
 async def _ready(check: Any) -> bool:
