@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import socket
 
+import httpx
 import pytest
 import pytest_asyncio
 import uvicorn
@@ -215,6 +216,64 @@ async def test_a_websocket_is_refused_while_the_sites_card_cant_be_read():
         await site_server.shutdown()
 
     assert refused.value.response.status_code == 503 and site.handshakes == []
+
+
+@pytest.mark.asyncio
+async def test_the_providers_headers_never_reach_the_site_over_http_or_a_websocket():
+    site, seen = EchoSite(), []
+
+    async def echo_headers(request):
+        seen.append(dict(request.headers))
+        return JSONResponse(dict(request.headers))
+
+    site.app.router.routes.insert(0, Route("/whoami", echo_headers))
+    site_server, site_port = await serve(site.app)
+    gateway = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
+                      website_urls={"notes": f"http://127.0.0.1:{site_port}"},
+                      provider_headers=["CF-Access-Client-Id", "cf-access-client-secret", " "])
+    gateway_server, gateway_port = await serve(gateway._asgi_app())
+    sent = {"CF-Access-Client-Id": "id", "CF-Access-Client-Secret": "secret", "X-Site": "kept"}
+    try:
+        async with httpx.AsyncClient() as client:
+            answer = await client.get(f"http://127.0.0.1:{gateway_port}/website/notes/whoami", headers=sent)
+        async with connect(f"ws://127.0.0.1:{gateway_port}/website/notes/live", additional_headers=sent) as websocket:
+            await websocket.send("ping")
+            assert await asyncio.wait_for(websocket.recv(), 5) == "PING"
+    finally:
+        await gateway_server.shutdown()
+        await site_server.shutdown()
+
+    [(_, handshake)] = site.handshakes
+    for headers in (seen[0], handshake, answer.json()):
+        assert "cf-access-client-id" not in headers and "cf-access-client-secret" not in headers
+        assert headers["x-site"] == "kept"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_handshake_keeps_the_sites_headers_each_cookie_apart():
+    async def refuse(websocket: WebSocket) -> None:
+        answer = JSONResponse({"error": "signed out"}, status_code=401)
+        answer.raw_headers += [(b"set-cookie", b"s=; Max-Age=0; Path=/"), (b"set-cookie", b"t=; Max-Age=0; Path=/"),
+                               (b"x-site", b"yes")]
+        await websocket.send_denial_response(answer)
+
+    site_server, site_port = await serve(Starlette(routes=[WebSocketRoute("/live", refuse)]))
+    gateway = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
+                      website_urls={"notes": f"http://127.0.0.1:{site_port}"})
+    gateway_server, gateway_port = await serve(gateway._asgi_app())
+    try:
+        with pytest.raises(InvalidStatus) as refused:
+            async with connect(f"ws://127.0.0.1:{gateway_port}/website/notes/live"):
+                pass
+    finally:
+        await gateway_server.shutdown()
+        await site_server.shutdown()
+
+    answer = refused.value.response
+    assert answer.status_code == 401 and answer.headers.get_all("set-cookie") == [
+        "s=; Max-Age=0; Path=/", "t=; Max-Age=0; Path=/"]
+    assert answer.headers["x-site"] == "yes" and answer.headers["content-type"] == "application/json"
+    assert answer.headers.get_all("content-length") == [str(len(answer.body))]
 
 
 @pytest.mark.asyncio

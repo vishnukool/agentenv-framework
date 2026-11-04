@@ -83,14 +83,16 @@ _WEBSOCKET_HANDSHAKE = frozenset({"sec-websocket-key", "sec-websocket-version", 
 # What the gateway's own WebSocket handshake answer writes for itself, so a site's copies aren't relayed.
 _WEBSOCKET_ANSWER_DROP = HOP_BY_HOP | {b"date", b"server", b"content-length", b"sec-websocket-accept",
                                       b"sec-websocket-protocol", b"sec-websocket-extensions"}
+_WEBSOCKET_REFUSAL_DROP = HOP_BY_HOP | {b"date", b"server", b"content-length"}
 _HTTP_SCHEME = {"ws": "http", "wss": "https"}
 WEBSOCKET_MESSAGE_MAX_BYTES = 16 * 1024 * 1024
 
 
 async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.Timeout, mcp_server: bool,
-                  role_key: str | None = None, on_done: Callable[[int], Awaitable[None]] | None = None) -> Response:
+                  role_key: str | None = None, on_done: Callable[[int], Awaitable[None]] | None = None,
+                  withheld: frozenset[bytes] = frozenset()) -> Response:
     """Forward `request` to the service at `base_url` as `role`, vouched for by `role_key` when the deploy has one,
-    and stream the response through. `mcp_server` says
+    without the headers named in `withheld`, and stream the response through. `mcp_server` says
     the service is a backing MCP server, whose own endpoint takes the role in its JSON-RPC `_meta` as well as in the
     header. A 400 names a request-target the proxy cannot route; a 502 names an upstream that never answered.
     `on_done` is awaited with the status once the response has ended, after its last byte when streamed."""
@@ -99,7 +101,7 @@ async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.
     except ValueError as e:  # an escaped slash inside the route prefix; refuse rather than forward a wrong path
         return await _done(_json_response({"error": str(e)}, 400), on_done)
     content = await request.body()  # /svc and /website request bodies are small (JSON-RPC, forms)
-    headers = upstream_headers(request, role, role_key)
+    headers = upstream_headers(request, role, role_key, withheld=withheld)
     if mcp_server and request.method == "POST" and is_child_mcp_path(request.path_params.get("path", "")):
         # The gateway is the trust boundary for identity: a child's proxied MCP endpoint stays reachable, but the
         # role in its JSON-RPC `_meta` is the gateway's to write, like the header above.
@@ -136,14 +138,17 @@ def upstream_url(base_url: str, request: HTTPConnection) -> str:
     return url
 
 
-def upstream_headers(request: HTTPConnection, role: str, role_key: str | None = None) -> httpx.Headers:
+def upstream_headers(request: HTTPConnection, role: str, role_key: str | None = None, *,
+                     withheld: frozenset[bytes] = frozenset()) -> httpx.Headers:
     """One entry per raw header, so repeated fields (cookie, x-forwarded-for) keep their multiplicity. The role
     and role key headers are the gateway's to set: the client's copies are dropped and the role the gateway
     attributed the request to goes in their place, with `role_key` beside any role but `default`, so the upstream
-    never reads a value the gateway did not write. So are the forwarded-address headers (`forwarded_address`)."""
+    never reads a value the gateway did not write. So are the forwarded-address headers (`forwarded_address`). The
+    headers named in `withheld` (lower case), the credentials of the provider in front of the gateway, are dropped,
+    so no service behind it reads them."""
     headers = httpx.Headers([(k, v) for k, v in request.headers.raw
                              if k.lower() not in HOP_BY_HOP and k.lower() not in (ROLE_HEADER_BYTES, ROLE_KEY_HEADER_BYTES)
-                             and k.lower() not in _FORWARDED])
+                             and k.lower() not in _FORWARDED and k.lower() not in withheld])
     headers[AGENT_ENV_ROLE_HEADER] = role
     if role_key and role != DEFAULT_ROLE:
         headers[AGENT_ENV_ROLE_KEY_HEADER] = role_key
@@ -234,20 +239,21 @@ def raw_remainder(raw_path: bytes, decoded_path: str, decoded_rest: str) -> byte
 
 
 async def relay_websocket(websocket: WebSocket, base_url: str, *, role: str, role_key: str | None = None,
-                          open_timeout: float = 10.0) -> None:
+                          open_timeout: float = 10.0, withheld: frozenset[bytes] = frozenset()) -> None:
     """Relay `websocket` to the service at `base_url` as `role`: a WebSocket of the gateway's own is opened to the same
     path, with the headers ``upstream_headers`` sends, asking for the subprotocols the client offered; `websocket` is
     accepted with the one the service chose and the headers its answer carried (a ``Set-Cookie`` among them, each
     field kept apart), but those the gateway's own answer writes. Each text and binary message is relayed as it came, and either side's
     close, with its code, closes the other; a message from the service larger than ``WEBSOCKET_MESSAGE_MAX_BYTES``, the
     size uvicorn takes from a client, closes both with 1009 rather than be held whole. A service that refuses the
-    handshake has its answer relayed as the refusal; one that never answers is a 502."""
+    handshake has its answer relayed as the refusal, its headers as an accepted one's are; one that never answers is a
+    502. The headers named in `withheld` don't go upstream, as with ``upstream_headers``."""
     try:
         target_url = upstream_url(base_url, websocket)
     except ValueError as e:
         await refuse_websocket(websocket, _json_response({"error": str(e)}, 400))
         return
-    headers = [(key, value) for key, value in upstream_headers(websocket, role, role_key).multi_items()
+    headers = [(key, value) for key, value in upstream_headers(websocket, role, role_key, withheld=withheld).multi_items()
                if key.lower() not in _WEBSOCKET_HANDSHAKE]
     offered = [protocol.strip() for value in websocket.headers.getlist("sec-websocket-protocol")
                for protocol in value.split(",") if protocol.strip()]
@@ -256,21 +262,27 @@ async def relay_websocket(websocket: WebSocket, base_url: str, *, role: str, rol
                                            subprotocols=offered or None, user_agent_header=None,
                                            open_timeout=open_timeout, max_size=WEBSOCKET_MESSAGE_MAX_BYTES)
     except InvalidStatus as e:
-        answer = e.response
-        await refuse_websocket(websocket, Response(content=answer.body or b"", status_code=answer.status_code,
-                                                   media_type=answer.headers.get("content-type")))
+        refusal = Response(content=bytes(e.response.body or b""), status_code=e.response.status_code)
+        refusal.raw_headers = [*(item for item in refusal.raw_headers if item[0] == b"content-length"),
+                               *_answer_headers(e.response.headers, drop=_WEBSOCKET_REFUSAL_DROP)]
+        await refuse_websocket(websocket, refusal)
         return
     except (InvalidHandshake, OSError, TimeoutError) as e:
         logger.error(f"WebSocket proxy to {target_url} failed: {e!r}")
         await refuse_websocket(websocket, _json_response({"error": f"Proxy request failed: {e!r}"}, 502))
         return
     async with upstream:
-        answer = [(key.encode("ascii", "surrogateescape"), value.encode("ascii", "surrogateescape"))
-                  for key, value in upstream.response.headers.raw_items()]
         await websocket.accept(subprotocol=upstream.subprotocol,
-                               headers=[(key.lower(), value) for key, value in answer
-                                        if key.lower() not in _WEBSOCKET_ANSWER_DROP])
+                               headers=_answer_headers(upstream.response.headers, drop=_WEBSOCKET_ANSWER_DROP))
         await _relay_messages(websocket, upstream)
+
+
+def _answer_headers(headers: Any, *, drop: frozenset[bytes]) -> list[tuple[bytes, bytes]]:
+    """A site's handshake answer's headers as the gateway relays them, each field apart (a ``Set-Cookie`` per cookie),
+    but those named in `drop`, which the gateway's own answer writes."""
+    return [(key.lower(), value) for key, value in
+            ((key.encode("ascii", "surrogateescape"), value.encode("ascii", "surrogateescape"))
+             for key, value in headers.raw_items()) if key.lower() not in drop]
 
 
 async def refuse_websocket(websocket: WebSocket, response: Response) -> None:

@@ -305,8 +305,10 @@ async def test_a_vm_gateway_refuses_an_image_its_vm_cant_get_before_creating_the
 
 
 @pytest.mark.asyncio
-async def test_container_mode_constructs_internal_mcp_servers_url_format():
-    """Container mode must pass INTERNAL_MCP_SERVERS as 'name=url,name=url' to the gateway."""
+async def test_container_mode_constructs_internal_mcp_servers_url_format(monkeypatch):
+    """Container mode must pass INTERNAL_MCP_SERVERS as 'name=url,name=url' to the gateway, and the names of the
+    providers' request headers, which it takes off what it forwards."""
+    monkeypatch.setattr(env_gateway_provider, "sandbox_request_header_names", lambda: ("cf-access-client-id", "x-a"))
     provider = ModalSandboxProvider()
     gp = EnvironmentGatewayProvider()
     gp._state_provider = LocalPostgresStateProvider()  # normally set by create_gateway
@@ -397,6 +399,7 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format():
     assert env["MCP_SERVER_NAME"] == "crm"
     assert result.mcp_server_name == "crm"
     assert env["AGENTENV_ROLE_KEY"] == result.role_key == "deploy-secret"
+    assert env["AGENTENV_PROVIDER_REQUEST_HEADERS"] == "cf-access-client-id,x-a"
 
     # Each MCP got DATABASE_URL with its scoped search_path
     mcp_calls = [c for c in create_calls if c["image_name"].startswith("mcp-")]
@@ -1191,6 +1194,26 @@ def test_redact_compose_secrets_masks_only_secret_env_lines():
     assert '      - "18768:8000"' in redacted
     # the un-redacted compose still carries the real secret (only the log copy is masked)
     assert "s3cr3t-token-value" in compose
+
+
+@pytest.mark.parametrize("names", [("cf-access-client-id", "cf-access-client-secret"), ()], ids=["named", "none"])
+def test_compose_gives_the_gateway_the_names_of_the_providers_request_headers_alone(names, monkeypatch):
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    monkeypatch.setattr(env_gateway_provider, "sandbox_request_header_names", lambda: names)
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+        gateway_image="agent-gateway",
+        website_configs=[WebsiteConfig(backend_image="notes-be", frontend_image=None, environment_name="notes")],
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+    )
+
+    services = yaml.safe_load(compose)["services"]
+    named = {name: [entry for entry in service.get("environment") or [] if "PROVIDER_REQUEST_HEADERS" in entry]
+             for name, service in services.items()}
+    expected = {GATEWAY_SERVICE_NAME: [f"AGENTENV_PROVIDER_REQUEST_HEADERS={','.join(names)}"]} if names else {}
+    assert {name: entries for name, entries in named.items() if entries} == expected
 
 
 @pytest.mark.parametrize("role_key", ["deploy-secret", None], ids=["keyed", "unkeyed"])

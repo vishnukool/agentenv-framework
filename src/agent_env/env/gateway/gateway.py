@@ -11,6 +11,7 @@ import os
 import posixpath
 import socket
 import subprocess
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -139,9 +140,12 @@ class Gateway:
         gateway_mode: GatewayMode = GatewayMode.PERFORMANCE,
         service_db_url: str | None = None,
         role_key: str | None = None,
+        provider_headers: Iterable[str] = (),
     ):
         """`role_key` is the deploy's secret: with one, a request is believed to act as a role other than `default`
-        only when it carries the key beside the role; without one, as before it, the role header alone is believed."""
+        only when it carries the key beside the role; without one, as before it, the role header alone is believed.
+        `provider_headers` names the headers the sandbox provider in front of the gateway is sent, its credentials,
+        which the gateway takes off every request it forwards to a service behind it."""
         self.host = host
         self.port = port
         self.server_name = server_name
@@ -152,6 +156,7 @@ class Gateway:
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
         self._role_key = role_key or None
+        self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
         self._website_routes: dict[str, list[WebsiteRoute] | None] = {}
         self._db_conn: psycopg2.extensions.connection | None = None
         if service_db_url:
@@ -637,7 +642,7 @@ class Gateway:
         mcp_server = url_map is self.rest_proxy_urls and service_name.startswith("mcp-")
         if request.method in _SAFE_METHODS:
             return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
-                                 role_key=self._role_key)
+                                 role_key=self._role_key, withheld=self._withheld)
         changelog_before = self._query_changelog_id()
         attribution = self._attribution(role)  # at the start: a fire may be gone by the time the response ends
 
@@ -662,7 +667,7 @@ class Gateway:
             })
 
         return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
-                             role_key=self._role_key, on_done=log_write)
+                             role_key=self._role_key, on_done=log_write, withheld=self._withheld)
 
     async def _proxy_website_request(self, request: Request) -> Response:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
@@ -706,7 +711,7 @@ class Gateway:
             await refuse_websocket(websocket, self._json_response({"error": f"Unknown service: {service_name}"}, 404))
             return
         await relay_websocket(websocket, base_url, role=self._request_role(websocket), role_key=self._role_key,
-                              open_timeout=self.REST_PROXY_CONNECT_TIMEOUT_S)
+                              open_timeout=self.REST_PROXY_CONNECT_TIMEOUT_S, withheld=self._withheld)
 
     async def _fire_website_triggers(self, request: Request, app: str,
                                      status: int) -> tuple[list[asyncio.Task], float | None]:

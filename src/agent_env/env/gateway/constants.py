@@ -148,6 +148,7 @@ AGENT_ENV_ROLE_KEY_HEADER = "AgentEnv-Role-Key"
 # Sent by a computer's site proxy, which serves a website's route at the root of the site's own name.
 AGENT_ENV_SITE_ROOT_HEADER = "AgentEnv-Site-Root"
 GATEWAY_ROLE_KEY_ENV = "AGENTENV_ROLE_KEY"
+GATEWAY_PROVIDER_HEADERS_ENV = "AGENTENV_PROVIDER_REQUEST_HEADERS"
 WEBSITE_ROLE_KEY_ENV = "WEBSITE_ROLE_KEY"
 # MCP request `_meta` keys the gateway stamps on every child tools/call: the caller's role, and on the MCP path a
 # key naming the inbound session, so a child can keep per-caller state behind the gateway's one shared session.

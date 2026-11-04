@@ -24,6 +24,7 @@ from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode
 from agent_env.env.gateway.constants import (
     DEFAULT_MCP_SERVER_NAME,
+    GATEWAY_PROVIDER_HEADERS_ENV,
     GATEWAY_ROLE_KEY_ENV,
     STATE_TOOL_NAME_CLASHES_KEY,
     WEBSITE_ROLE_KEY_ENV,
@@ -63,6 +64,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SANDBOX_MODE_VM,
     Accepts,
     SandboxProvider,
+    sandbox_request_header_names,
 )
 from agent_env.store.image_store.oci_registry_credentials import image_reference_problem
 
@@ -508,6 +510,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         gateway_env.append(f"      - SERVICE_DB_URL={state_provider.base_url(state_instance)}")
         if role_key:
             gateway_env.append(f"      - {GATEWAY_ROLE_KEY_ENV}={role_key}")
+        if provider_headers := sandbox_request_header_names():
+            gateway_env.append(f"      - {GATEWAY_PROVIDER_HEADERS_ENV}={','.join(provider_headers)}")
         publish = host_port or (lambda port: port)
         exposed_gateway_ports = []
         if expose_gateway_port:
@@ -1074,6 +1078,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "SERVICE_DB_URL": self._state_provider.base_url(state_instance),
                 "MCP_SERVER_NAME": mcp_server_name or DEFAULT_MCP_SERVER_NAME,
                 **({GATEWAY_ROLE_KEY_ENV: role_key} if role_key else {}),
+                **({GATEWAY_PROVIDER_HEADERS_ENV: ",".join(names)} if (names := sandbox_request_header_names()) else {}),
             }
             gateway_sb = await sandbox_provider.create_container(
                 image_name=gateway_env.docker_image_artifact.image_name,
