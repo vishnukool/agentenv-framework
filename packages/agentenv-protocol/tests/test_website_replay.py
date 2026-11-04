@@ -211,7 +211,6 @@ def test_api_routes_win_over_the_capture_and_the_capture_over_built_in_routes(cl
 def test_the_data_plane_exports_the_overrides_state(client):
     assert client.post("/api/cart", json={"sku": "lamp"}).json() == {"sku": "lamp", "id": 1}
     assert rpc(client, "data/get")["parts"][0]["data"] == {"cart": [{"sku": "lamp", "id": 1}]}
-    assert client.get("/go").json()["state_diff"]["cart"]["added"] == [{"sku": "lamp", "id": 1}]
     rpc(client, "data/reset")
     assert rpc(client, "data/get")["parts"][0]["data"] == {}
 
@@ -306,13 +305,6 @@ def test_the_built_in_routes_follow_the_capture_being_served(client):
     assert client.get("/api/session").json()["signed_in"] is False
     rpc(client, "data/reset")
     assert client.get("/api/session").json() == {"captured": True}
-
-    empty = TestClient(Shop(warc()).create_app())
-    assert empty.get("/go").json()["state_diff"] == {}
-    rpc(empty, "data/add", {"parts": [{"kind": "file", "file": {"bytes": base64.b64encode(warc(
-        ("https://shop.example/go", 200, [("Content-Type", "application/json")], b'{"captured go": 1}'))).decode(),
-        "name": "go.warc"}}]})
-    assert empty.get("/go").json() == {"captured go": 1}
 
 
 class Rows:

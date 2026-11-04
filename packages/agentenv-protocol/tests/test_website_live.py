@@ -8,9 +8,9 @@ import pytest
 from starlette.testclient import TestClient
 
 from agentenv_protocol import DataPart, add_data, get_data, reset_data
-from agentenv_protocol.client import find_extension, find_extension_method
-from agentenv_protocol.website import (WEBSITE_EXTENSION_URI, WEBSITE_STATE_OP, Cookie, WebsiteEnvironment, api,
-                                       ready_check, session, website)
+from agentenv_protocol.client import find_extension
+from agentenv_protocol.website import (WEBSITE_EXTENSION_URI, Cookie, WebsiteEnvironment, api, ready_check, session,
+                                       website)
 from agentenv_protocol.website.browser import cookies, devtools, redacted, storage_state
 
 SESSION = "/agentenv/ext/website/session"
@@ -54,7 +54,7 @@ def client(monkeypatch) -> TestClient:
 
 
 def test_a_live_site_serves_no_pages_only_its_health_data_plane_and_card(client):
-    for path in ("/", "/login", "/api/session", "/go"):
+    for path in ("/", "/login", "/api/session"):
         assert client.get(path).status_code == 404, path
     assert client.get("/api/health").status_code == 200
     card = client.get("/.well-known/agent-env.json").json()
@@ -91,17 +91,6 @@ def test_a_live_site_without_a_session_method_says_so():
     assert params["signs_in"] is False
     answer = client.post(SESSION, json={})
     assert answer.status_code == 501 and answer.json()["error"]["code"] == "no_session"
-
-
-def test_a_live_site_keeping_the_default_store_answers_no_state():
-    @website(domains=["example.com"], live=True)
-    class Plain(WebsiteEnvironment):
-        pass
-
-    client = TestClient(Plain().create_app())
-    card = client.get("/.well-known/agent-env.json").json()
-    assert find_extension_method(card, WEBSITE_EXTENSION_URI, WEBSITE_STATE_OP) is None
-    assert client.get("/agentenv/ext/website/state").status_code == 404 and client.get("/go").status_code == 404
 
 
 def test_a_session_method_returning_a_bad_cookie_is_refused_without_its_value():

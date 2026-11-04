@@ -54,7 +54,7 @@ from starlette.routing import BaseRoute, Match, NoMatchFound, Route
 
 from ..agent_env_environment import add_data, reset_data
 from ..types import FilePart
-from .environment import SESSION_PATH, STATE_PATH, WebsiteEnvironment, default_store_hook, website
+from .environment import SESSION_PATH, WebsiteEnvironment, default_store_hook, website
 from .errors import NotFound
 from .routes import error_response, reserved_path
 
@@ -457,7 +457,7 @@ class ReplayWebsite(WebsiteEnvironment):
         if declaration.static is not None or declaration.live:
             raise ValueError(f"{type(self).__name__} serves its capture, so it takes no static folder and isn't live")
         asgi = super().create_app()
-        built_in = {SESSION_PATH: self._session, STATE_PATH: self._state}
+        built_in = {SESSION_PATH: self._session}
         paths = {r.path for r in asgi.router.routes if isinstance(r, Route) and built_in.get(r.path) == r.endpoint}
         replay = _Replay(self, type(self).app)
         asgi.router.routes.insert(0, _Captured(self, paths, replay))
