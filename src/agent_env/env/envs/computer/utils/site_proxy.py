@@ -192,12 +192,14 @@ def origin(scheme: str, netloc: str) -> tuple[str, str, int]:
 def public_location(location: str, site: Site, scheme: str, host: str) -> str:
     """A ``Location`` the upstream sent, as the browser follows it: one on the site's route, under the gateway's address,
     under the site's own name (as a site that ignores ``AgentEnv-Site-Root`` may send) or as a path, is rewritten onto
-    the site's name; any other is left alone."""
+    the site's name; any other is left alone. A scheme-relative one is read with the scheme of the page it was sent
+    to: the route's for the gateway's address, the browser's for the site's name."""
     parts = urlsplit(location)
-    if parts.scheme or parts.netloc:
-        if origin(parts.scheme, parts.netloc) not in (origin(site.scheme, site.netloc), origin(scheme, host)):
+    if parts.netloc:
+        pages = ((site.scheme, site.netloc), (scheme, host))
+        if not any(origin(parts.scheme or own, parts.netloc) == origin(own, netloc) for own, netloc in pages):
             return location
-    elif not location.startswith("/") or location.startswith("//"):
+    elif parts.scheme or not location.startswith("/"):
         return location
     path = parts.path
     if not (path == site.prefix or path.startswith(site.prefix + "/")) or not site.prefix:
@@ -214,6 +216,7 @@ def public_cookie(value: str, site: Site) -> str:
     kept = [first]
     for attribute in attributes:
         key, _, attr_value = attribute.strip().partition("=")
+        key, attr_value = key.strip(), attr_value.strip()
         if key.lower() == "domain" and attr_value.strip().lstrip(".").lower() == site.host.lower():
             continue
         if key.lower() == "path" and site.prefix and (attr_value == site.prefix

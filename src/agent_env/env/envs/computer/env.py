@@ -252,6 +252,10 @@ class ComputerEnv(Env):
         """With ``site_routing`` and no ``sites``, ``env_params`` naming as its sites the websites the run deployed
         before the computer: all of them, or those of the env ids ``site_routing`` lists."""
         routing = (env_params or {}).get("site_routing")
+        if routing is not None and routing is not False and routing is not True and not (
+                isinstance(routing, list) and all(isinstance(env_id, str) for env_id in routing)):
+            raise ValueError(f"computer env {self.id!r}: env_params.site_routing is true or a list of env ids, not "
+                             f"{routing!r}")
         if not routing or env_params.get("sites"):
             return env_params
         found = await sites.deployed_sites(deployed_envs, None if routing is True else list(routing))

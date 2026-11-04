@@ -3,6 +3,7 @@ deploy, how the proxy is installed through the sandbox's root channel, and the s
 
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -147,7 +148,7 @@ class FakeVm(VmSandbox):
     vnc_url = None
 
     def __init__(self, report):
-        self.report, self.scripts, self.written, self.events = report, [], {}, []
+        self.report, self.scripts, self.written, self.events, self.staged = report, [], {}, [], {}
 
     @property
     def container_name(self):
@@ -162,6 +163,20 @@ class FakeVm(VmSandbox):
     async def write_file_from_text(self, content, destination_path, container=None):
         self.written[destination_path] = content
         self.events.append(("write", destination_path))
+
+    @contextlib.asynccontextmanager
+    async def secret_dir(self):
+        yield "/tmp/secret-1"
+        self.events.append(("removed", "/tmp/secret-1"))
+
+    async def write_secret_file(self, data, vm_path):
+        self.staged[vm_path] = data.decode()
+        self.events.append(("secret", vm_path))
+
+    async def docker_cp(self, source, destination, *, remove_source=False):
+        container, path = destination.split(":", 1)
+        self.written[path] = self.staged.pop(source) if remove_source else self.staged[source]
+        self.events.append(("cp", source, destination))
 
     async def exec_script(self, script, *, max_retries=0):
         self.scripts.append(script)
@@ -188,12 +203,27 @@ async def test_route_installs_the_proxy_as_root_with_each_sites_route_as_the_com
     assert site["key_pem"] and config["ca_pem"] == routed["ca"]
     assert sandbox.scripts == ["docker exec -u 0 computer-1 mkdir -p /etc/agentenv/sites",
                                "docker exec -u 0 computer-1 chmod 0700 /etc/agentenv/sites",
+                               "docker exec -u 0 computer-1 mkdir -p /etc/agentenv/sites",
                                "docker exec -u 0 computer-1 chmod 0600 /etc/agentenv/sites/config.json",
                                "docker exec -u 0 computer-1 python3 /etc/agentenv/sites/site_proxy.py install "
                                "/etc/agentenv/sites/config.json"]
     assert "upstream_headers" not in site
     assert routed["checks"] == _REPORT["checks"] and routed["names"]["routes"] == {"notes": ["notes.test"]}
     assert "PRIVATE KEY" not in json.dumps(routed)
+
+
+@pytest.mark.asyncio
+async def test_the_config_holding_the_keys_is_written_over_stdin_into_a_private_staging_folder_never_as_text():
+    sandbox = FakeVm(_REPORT)
+
+    await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
+                      valid_for=timedelta(hours=1), label="desktop")
+
+    assert ("write", "/etc/agentenv/sites/config.json") not in sandbox.events
+    secret = sandbox.events.index(("secret", "/tmp/secret-1/config.json"))
+    copied = sandbox.events.index(("cp", "/tmp/secret-1/config.json", "computer-1:/etc/agentenv/sites/config.json"))
+    assert secret < copied < sandbox.events.index(("removed", "/tmp/secret-1")) and sandbox.staged == {}
+    assert not any("PRIVATE KEY" in script for script in sandbox.scripts)
 
 
 @pytest.mark.asyncio
@@ -210,7 +240,8 @@ async def test_the_headers_the_gateways_provider_asks_for_go_in_the_private_conf
     (site,) = json.loads(sandbox.written["/etc/agentenv/sites/config.json"])["sites"]
     assert site["upstream_headers"] == {"CF-Access-Client-Secret": "s3cret"}
     private = sandbox.events.index("docker exec -u 0 computer-1 chmod 0600 /etc/agentenv/sites/config.json")
-    assert sandbox.events.index(("write", "/etc/agentenv/sites/config.json")) < private < len(sandbox.events) - 1
+    copied = ("cp", "/tmp/secret-1/config.json", "computer-1:/etc/agentenv/sites/config.json")
+    assert sandbox.events.index(copied) < private < len(sandbox.events) - 1
     assert "s3cret" not in json.dumps(routed)
 
 
@@ -222,7 +253,7 @@ async def test_the_sites_keys_land_in_a_folder_root_alone_can_enter():
                       valid_for=timedelta(hours=1), label="desktop")
 
     private = sandbox.events.index("docker exec -u 0 computer-1 chmod 0700 /etc/agentenv/sites")
-    assert private < sandbox.events.index(("write", "/etc/agentenv/sites/config.json"))
+    assert private < sandbox.events.index(("cp", "/tmp/secret-1/config.json", "computer-1:/etc/agentenv/sites/config.json"))
     assert "key_pem" in sandbox.written["/etc/agentenv/sites/config.json"]
 
 

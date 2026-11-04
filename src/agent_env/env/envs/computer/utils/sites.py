@@ -342,6 +342,20 @@ class RootChannel:
         await self.run(["mkdir", "-p", str(path.parent)])
         await self.sandbox.write_file_from_text(text, str(path))
 
+    async def write_secret(self, path: PurePosixPath, text: str) -> None:
+        """Write ``text``, which holds keys or credentials, to ``path``. On a VM it's staged on the host in a folder
+        its owner alone can open (``secret_dir``), written over the exec's stdin (``write_secret_file``), so it's
+        never on a command line, and moved into the container, its staged copy removed. Other sandboxes write files
+        through their provider's API, as ``write`` does."""
+        if not isinstance(self.sandbox, VmSandbox):
+            await self.write(path, text)
+            return
+        await self.run(["mkdir", "-p", str(path.parent)])
+        async with self.sandbox.secret_dir() as secrets:
+            staged = f"{secrets}/{path.name}"
+            await self.sandbox.write_secret_file(text.encode(), staged)
+            await self.sandbox.docker_cp(staged, f"{self.sandbox.container_name}:{path}", remove_source=True)
+
     async def run(self, argv: list[str]) -> str:
         if isinstance(self.sandbox, VmSandbox):
             return await self.sandbox.exec_script(f"docker exec -u 0 {shlex.quote(self.sandbox.container_name)} "
@@ -382,7 +396,8 @@ async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], net
     channel = RootChannel(sandbox)
     await channel.private_folder(FOLDER)
     await channel.write(PROXY, _PROXY_SOURCE.read_text())
-    await channel.write(CONFIG, json.dumps(proxy_config(table, issued, user=user, upstream_headers=upstream_headers)))
+    await channel.write_secret(CONFIG, json.dumps(proxy_config(table, issued, user=user,
+                                                               upstream_headers=upstream_headers)))
     await channel.run(["chmod", "0600", str(CONFIG)])
     output = await channel.run(["python3", str(PROXY), "install", str(CONFIG)])
     report = json.loads(output.strip().splitlines()[-1])

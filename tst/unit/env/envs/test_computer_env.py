@@ -696,6 +696,15 @@ async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deploye
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("routing", ["web-env", 1, ["web-env", 2], {"web-env": True}])
+async def test_a_site_routing_that_is_neither_true_nor_a_list_of_env_ids_is_refused_before_it_is_read(
+        base, driver, routing):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    with pytest.raises(ValueError, match="site_routing is true or a list of env ids"):
+        await env.run_env_params({"site_routing": routing}, [_sites_gateway()])
+
+
+@pytest.mark.asyncio
 async def test_a_computer_without_site_routing_routes_nothing_whatever_websites_the_run_deployed(
         base, driver, docker, boots, routes):
     env = _put(base, driver, display={"width": 1600, "height": 900})

@@ -239,17 +239,30 @@ async def test_a_redirect_or_cookie_naming_the_route_is_rewritten_onto_the_sites
     ("https://notes.test/a", "https://notes.test/a"),
     ("/a", "/a"),
     ("a/b", "a/b"),
-    ("//gw:8080/website/notes/a", "//gw:8080/website/notes/a"),
+    ("//gw:8080/website/notes/a", "https://notes.test/a"),
+    ("//other.example/website/notes/a", "//other.example/website/notes/a"),
     ("https://notes.test/website/notes/app/", "https://notes.test/app/"),
     ("https://notes.test:443/website/notes", "https://notes.test/"),
     ("http://notes.test/website/notes/a", "http://notes.test/website/notes/a"),
 ], ids=["path", "prefix-alone", "gateway-url", "another-site", "outside-routes", "other-scheme", "site-url",
-        "site-path", "relative", "scheme-relative", "site-url-under-prefix", "site-url-default-port",
+        "site-path", "relative", "scheme-relative", "scheme-relative-elsewhere", "site-url-under-prefix", "site-url-default-port",
         "site-name-other-scheme"])
 def test_only_a_location_on_the_sites_route_is_moved_onto_its_name(location, expected):
     site = Site("notes", "http://gw:8080/website/notes/", ["notes.test"])
 
     assert site_proxy.public_location(location, site, "https", "notes.test") == expected
+
+
+@pytest.mark.parametrize(("cookie", "expected"), [
+    ("s=1; Path = /website/notes/x", "s=1; Path=/x"),
+    ("s=1; path=/website/notes", "s=1; Path=/"),
+    ("s=1;PATH= /website/notes/a/b ; HttpOnly", "s=1; Path=/a/b; HttpOnly"),
+    ("s=1; Path=/website/other", "s=1; Path=/website/other"),
+], ids=["spaced", "lower-case", "upper-case-spaced", "another-route"])
+def test_a_cookie_path_on_the_route_is_rooted_however_it_is_spelled(cookie, expected):
+    site = Site("notes", "http://gw:8080/website/notes/", ["notes.test"])
+
+    assert site_proxy.public_cookie(cookie, site) == expected
 
 
 @pytest.mark.asyncio
