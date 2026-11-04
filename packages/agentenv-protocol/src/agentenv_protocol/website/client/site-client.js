@@ -53,7 +53,12 @@ export async function api(path, { method = "GET", body, headers = {} } = {}) {
     throw new ApiError(0, "network_error", `${method} ${url}: ${cause?.message || cause}`, null);
   }
   follow(response);
-  const text = await response.text();
+  let text;
+  try {
+    text = await response.text();
+  } catch (cause) {
+    throw new ApiError(response.status, "network_error", `${method} ${url}: ${cause?.message || cause}`, null);
+  }
   let data = null;
   try {
     data = text ? JSON.parse(text) : null;
