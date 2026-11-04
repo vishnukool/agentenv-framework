@@ -216,6 +216,18 @@ def test_the_data_plane_exports_the_overrides_state(client):
     assert rpc(client, "data/get")["parts"][0]["data"] == {}
 
 
+def test_a_cookie_scoped_to_a_path_holds_at_that_path_behind_the_gateways_prefix():
+    site = TestClient(Shop(warc(("https://shop.example/account/sign-in", 200, [
+        ("Set-Cookie", "sid=abc; Domain=shop.example; path=/account; Secure"),
+        ("Set-Cookie", "theme=dark"),
+        ("Set-Cookie", "note=1; Path=relative")], b"ok"))).create_app())
+    behind = {"X-Forwarded-Prefix": "/website/shop"}
+    assert site.get("/account/sign-in", headers=behind).headers.get_list("set-cookie") == [
+        "sid=abc; path=/website/shop/account; Secure", "theme=dark", "note=1; Path=relative"]
+    assert site.get("/account/sign-in").headers.get_list("set-cookie") == [
+        "sid=abc; path=/account; Secure", "theme=dark", "note=1; Path=relative"]
+
+
 def test_a_replay_behind_the_gateways_prefix_matches_the_sites_own_path(client):
     behind = {"X-Forwarded-Prefix": "/website/shop"}
     assert client.get("/", headers=behind).text == "<html><body>home</body></html>"
@@ -225,6 +237,7 @@ def test_a_replay_behind_the_gateways_prefix_matches_the_sites_own_path(client):
     assert client.get("/nowhere", headers=behind).status_code == 404
     moved = client.get("/old", headers=behind, follow_redirects=False)
     assert moved.headers["location"] == "/website/shop/new?x=1"
+    assert client.get("/login", headers=behind).headers["set-cookie"] == "sid=abc; Path=/website/shop/; HttpOnly"
 
     relative = TestClient(Shop(warc(("https://shop.example/a", 302, [("Location", "/b")], b""),
                                     ("https://shop.example/c", 302, [("Location", "d")], b""))).create_app())

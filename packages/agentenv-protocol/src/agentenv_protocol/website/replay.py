@@ -573,14 +573,26 @@ class _Replay:
         return response
 
     def _header(self, name: str, value: str, root: str = "") -> str:
-        """``value`` as the replay answers it: a Set-Cookie without its Domain, so it holds at the replay's host, and
-        a redirect to a captured host or a root-relative one led by the ``root`` path the replay is served under, so
-        it stays on the replay behind a gateway's prefix too."""
+        """``value`` as the replay answers it: a Set-Cookie without its Domain, so it holds at the replay's host, with
+        its Path led by the ``root`` path the replay is served under, so it holds there for the paths it named; and a
+        redirect to a captured host or a root-relative one led by ``root`` too, so it stays on the replay behind a
+        gateway's prefix."""
         if name == "set-cookie":
-            return ";".join(p for p in value.split(";") if not p.strip().lower().startswith("domain="))
+            return ";".join(_cookie_attribute(p, root) for p in value.split(";")
+                            if not p.strip().lower().startswith("domain="))
         if name == "location":
             return _rewritten_url(value, self.env.archive.hosts, root)
         return value
+
+
+def _cookie_attribute(part: str, root: str) -> str:
+    """A Set-Cookie attribute as the replay answers it: a ``Path`` that names a path of the site led by ``root``, so a
+    cookie scoped to ``/account`` holds at ``<root>/account``; anything else as it is."""
+    name, _, path = part.partition("=")
+    root = root.rstrip("/")
+    if not root or name.strip().lower() != "path" or not path.strip().startswith("/"):
+        return part
+    return f"{name}={root}{path.strip()}"
 
 
 _ABSOLUTE_URL = re.compile(r"(?P<lead>\s*)(?:https?:)?//(?P<netloc>[^/?#\s]*)(?P<rest>.*)", re.IGNORECASE | re.DOTALL)
