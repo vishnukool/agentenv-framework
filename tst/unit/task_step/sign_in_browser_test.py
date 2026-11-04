@@ -241,6 +241,38 @@ async def test_a_reset_signs_the_browser_in_again(gateway, browser, monkeypatch)
     assert browser.calls[1][1]["cookies"][0]["value"] == f"{TOKEN}-octocat"
 
 
+@pytest.mark.asyncio
+async def test_with_two_deployments_of_the_env_the_one_env_step_id_names_is_signed_in_and_signed_in_again(
+        gateway, browser, monkeypatch):
+    first, second = gateway.deployed({"deploy_step_id": "deploy-a"}), gateway.deployed({"deploy_step_id": "deploy-b"})
+    context = TaskStepContext(deployed_envs=[first, second])
+    with pytest.raises(RuntimeError, match=r"2 deployments of env 'e1' \(deployed by: \['deploy-a', 'deploy-b'\]\)"):
+        await SignInBrowserTaskStep(id="s", version=1, env_id="e1").execute(context)
+    with pytest.raises(RuntimeError, match="env_step_id 'deploy-c' names no deployment"):
+        await SignInBrowserTaskStep(id="s", version=1, env_id="e1", env_step_id="deploy-c").execute(context)
+    step = SignInBrowserTaskStep(id="sign-in", version=1, env_id="e1", env_step_id="deploy-b", timeout_seconds=90)
+    assert SignInBrowserTaskStep.from_dict(step.to_dict()).env_step_id == "deploy-b"
+    await step.execute(context)
+    entry = context.metadata[SIGN_INS_KEY]["sign-in"]
+    assert (entry["env_step_id"], entry["timeout_seconds"]) == ("deploy-b", 90)
+
+    timeouts = []
+    real_invoke = gateway.invoke
+
+    async def invoke(base_url, card, uri, params=None, timeout=30, *args, **kwargs):
+        timeouts.append(timeout)
+        return await real_invoke(base_url, card, uri, params, timeout, *args, **kwargs)
+
+    monkeypatch.setattr(env_module.protocol_v1, "invoke_extension", invoke)
+    from agent_env.task_step.task_steps.sign_in_browser import sign_in_again
+
+    browser.calls.clear()
+    await sign_in_again(context, first)
+    assert browser.calls == [] and timeouts == []
+    await sign_in_again(context, second)
+    assert [call for call, _ in browser.calls] == ["clear", "set"] and set(timeouts) == {90}
+
+
 @environment_card(name="github")
 class GitHubMcp(AgentEnvEnvironment):
     pass

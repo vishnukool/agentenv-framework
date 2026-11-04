@@ -11,6 +11,8 @@ is recorded under ``unreachable`` and warned about, not added; a run whose sandb
 browser/v1 ``cookies/set``, each called on the child env's own card as the env's card nests it, so a site sharing its
 name with an MCP server, or with another child, is still the one called. The cookies never enter the context, a log or
 the step's record, which keeps only each cookie's name, domain, path and expiry. reset_env signs the browser in again after a reset, as the last sign-in did.
+With several deployments of the env in a run, ``env_step_id`` names the deploy_env step whose deployment it signs in; the
+record keeps that step and the call timeout, so the sign-in after a reset reaches the same browser the same way.
 """
 
 from __future__ import annotations
@@ -176,7 +178,8 @@ async def sign_in(context: TaskStepContext, deployed: Any, *, users: Optional[di
                            f"({', '.join(str(c.url) for c in offered)}), so the name can't say which to sign in")
     target = offered[0] if chosen else None
     browser = target.name if target is not None else browser
-    record: dict = {"env_id": deployed.env_id, "browser": browser, "sites": []}
+    record: dict = {"env_id": deployed.env_id, "env_step_id": deploy_step_of(deployed), "browser": browser,
+                    "timeout_seconds": timeout, "sites": []}
     for site in chosen:
         user = (users or {}).get(site.name)
         try:
@@ -215,25 +218,53 @@ def _why(error: Exception) -> str:
     return type(error).__name__
 
 
-async def sign_in_again(context: TaskStepContext, env_id: str) -> None:
-    """After a reset of ``env_id``, sign its browser in again as each sign-in of this run did; never raises."""
-    deployed = next((d for d in context.deployed_envs if d.env_id == env_id), None)
+def deploy_step_of(deployed: Any) -> Optional[str]:
+    """The id of the deploy_env step that deployed ``deployed``, or None."""
+    return (getattr(deployed, "metadata", None) or {}).get("deploy_step_id")
+
+
+def deployment(context: TaskStepContext, env_id: str, env_step_id: Optional[str], step_id: str) -> Any:
+    """The deployment of ``env_id`` a sign-in reaches: the one deploy_env step ``env_step_id`` made, else the only one;
+    raises when there is none, or several and no ``env_step_id`` says which."""
+    matches = [d for d in context.deployed_envs if d.env_id == env_id]
+    if env_step_id is not None:
+        named = [d for d in matches if deploy_step_of(d) == env_step_id]
+        if not named:
+            raise RuntimeError(f"sign_in_browser {step_id!r}: env_step_id {env_step_id!r} names no deployment of env "
+                               f"{env_id!r} (deployed by: {[deploy_step_of(d) for d in matches]})")
+        matches = named
+    if not matches:
+        raise RuntimeError(f"Env '{env_id}' not found in context.deployed_envs")
+    if len(matches) > 1:
+        raise RuntimeError(f"sign_in_browser {step_id!r}: {len(matches)} deployments of env {env_id!r} (deployed by: "
+                           f"{[deploy_step_of(d) for d in matches]}); set env_step_id to the deploy_env step whose "
+                           "browser to sign in")
+    return matches[0]
+
+
+async def sign_in_again(context: TaskStepContext, deployed: Any) -> None:
+    """After a reset of ``deployed``, sign its browser in again as each sign-in of this run that reached it did, with
+    the same timeout; never raises."""
     for step_id, entry in list((context.metadata.get(SIGN_INS_KEY) or {}).items()):
-        if deployed is None or entry.get("env_id") != env_id or not entry.get("sites"):
+        if entry.get("env_id") != deployed.env_id or not entry.get("sites"):
+            continue
+        if entry.get("env_step_id") is not None and entry["env_step_id"] != deploy_step_of(deployed):
             continue
         users = {s["name"]: s["user"] for s in entry["sites"] if s.get("user")}
         try:
             context.metadata[SIGN_INS_KEY][step_id] = await sign_in(
-                context, deployed, users=users, sites=[s["name"] for s in entry["sites"]], browser=entry.get("browser"))
+                context, deployed, users=users, sites=[s["name"] for s in entry["sites"]], browser=entry.get("browser"),
+                timeout=entry.get("timeout_seconds") or 30)
         except Exception as e:
-            logger.warning("reset_env: signing env %s's browser in again failed: %s", env_id, e)
+            logger.warning("reset_env: signing env %s's browser in again failed: %s", deployed.env_id, e)
             entry["error"] = str(e)[:_ERROR_CHARS]
 
 
 class SignInBrowserTaskStep(TaskStep):
     """Sign a deployed env's browser in to its live websites before the agent starts. ``users`` maps a site's name to
     the user to sign in as; ``sites`` limits it to some live sites; ``browser`` names the child env serving browser/v1
-    when there are several."""
+    when there are several; ``env_step_id`` names the deploy_env step whose deployment it signs in, when the env is
+    deployed more than once."""
 
     type: ClassVar[str] = "sign_in_browser"
     entity_refs = (EntityRef.env("env_id"),)
@@ -241,7 +272,7 @@ class SignInBrowserTaskStep(TaskStep):
     def __init__(self, id: str, version: Optional[int], env_id: str, users: Optional[dict[str, str]] = None,
                  sites: Optional[list[str]] = None, browser: Optional[str] = None,
                  depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = True,
-                 timeout_seconds: int = 30):
+                 timeout_seconds: int = 30, env_step_id: Optional[str] = None):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         if not env_id:
             raise ValueError("sign_in_browser needs the env_id of the env whose browser it signs in")
@@ -249,11 +280,11 @@ class SignInBrowserTaskStep(TaskStep):
                 isinstance(k, str) and isinstance(v, str) for k, v in users.items())):
             raise ValueError("sign_in_browser's users maps a site's name to a user's")
         self.env_id, self.users, self.sites, self.browser = env_id, users, sites, browser
-        self.timeout_seconds = timeout_seconds
+        self.timeout_seconds, self.env_step_id = timeout_seconds, env_step_id
 
     def to_dict(self) -> dict:
         data = {**super().to_dict(), "env_id": self.env_id, "timeout_seconds": self.timeout_seconds}
-        for key in ("users", "sites", "browser"):
+        for key in ("users", "sites", "browser", "env_step_id"):
             if getattr(self, key) is not None:
                 data[key] = getattr(self, key)
         return data
@@ -262,12 +293,10 @@ class SignInBrowserTaskStep(TaskStep):
     def from_dict(cls, data: dict) -> SignInBrowserTaskStep:
         return cls(**cls._base_from_dict(data), env_id=data["env_id"], users=data.get("users"),
                    sites=data.get("sites"), browser=data.get("browser"),
-                   timeout_seconds=data.get("timeout_seconds", 30))
+                   timeout_seconds=data.get("timeout_seconds", 30), env_step_id=data.get("env_step_id"))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
-        if deployed is None:
-            raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
+        deployed = deployment(context, self.env_id, self.env_step_id, self.id)
         if live_sites(deployed.environment_card) and self.env_id not in (context.metadata.get(LIVE_KEY) or {}):
             mark_live(context, deployed)
         try:
