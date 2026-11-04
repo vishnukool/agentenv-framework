@@ -419,6 +419,25 @@ def test_a_capture_that_expands_past_its_limit_is_refused_while_it_is_read(clien
     assert Archive.read(warc(("https://shop.example/", 200, [], b"x" * 40_000))).find("GET", "/").body == b"x" * 40_000
 
 
+def test_many_small_compressed_answers_are_refused_once_their_decoded_bodies_together_pass_the_limit(monkeypatch):
+    from agentenv_protocol.website import replay
+
+    def answers(count: int) -> bytes:
+        records = b""
+        for n in range(count):
+            body = gzip.compress(b"x" * 20_000)
+            http = (f"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body
+            records += (f"WARC/1.0\r\nWARC-Type: response\r\nWARC-Target-URI: https://shop.example/{n}\r\n"
+                        f"Content-Type: application/http;msgtype=response\r\nContent-Length: {len(http)}\r\n\r\n"
+                        ).encode() + http + b"\r\n\r\n"
+        return records
+
+    monkeypatch.setattr(replay, "MAX_CAPTURE_BYTES", 50_000)
+    assert len(answers(3)) < 50_000 and len(Archive.read(answers(2))) == 2
+    with pytest.raises(ValueError, match="answers are over 50000 bytes decoded"):
+        Archive.read(answers(3))
+
+
 class _StyledSite(_Site):
     """A page whose stylesheet imports another and loads an image, a font, a data URI and another site's image."""
 

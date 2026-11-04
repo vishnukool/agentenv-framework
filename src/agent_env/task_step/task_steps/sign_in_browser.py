@@ -38,6 +38,7 @@ LIVE_KEY = "live_websites"
 REPRODUCIBLE_KEY = "reproducible"
 SIGN_INS_KEY = "browser_sign_ins"
 _ERROR_CHARS = 500
+SIGN_IN_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -157,7 +158,7 @@ def mark_live(context: TaskStepContext, deployed: Any) -> dict:
 
 async def sign_in(context: TaskStepContext, deployed: Any, *, users: Optional[dict[str, str]] = None,
                   sites: Optional[list[str]] = None, browser: Optional[str] = None, clear: bool = True,
-                  timeout: int = 30) -> dict:
+                  timeout: int = SIGN_IN_TIMEOUT_SECONDS) -> dict:
     """Sign ``deployed``'s browser in to its live websites (those named in ``sites``, else every one with a session),
     each as ``users[name]`` or the site's own choice; with ``clear``, a site's old cookies go first, on a browser that
     serves cookies/clear. Returns the record of what was set, cookies by everything but their values."""
@@ -254,7 +255,7 @@ async def sign_in_again(context: TaskStepContext, deployed: Any) -> None:
         try:
             context.metadata[SIGN_INS_KEY][step_id] = await sign_in(
                 context, deployed, users=users, sites=[s["name"] for s in entry["sites"]], browser=entry.get("browser"),
-                timeout=entry.get("timeout_seconds") or 30)
+                timeout=entry.get("timeout_seconds") or SIGN_IN_TIMEOUT_SECONDS)
         except Exception as e:
             logger.warning("reset_env: signing env %s's browser in again failed: %s", deployed.env_id, e)
             entry["error"] = str(e)[:_ERROR_CHARS]
@@ -272,7 +273,7 @@ class SignInBrowserTaskStep(TaskStep):
     def __init__(self, id: str, version: Optional[int], env_id: str, users: Optional[dict[str, str]] = None,
                  sites: Optional[list[str]] = None, browser: Optional[str] = None,
                  depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = True,
-                 timeout_seconds: int = 30, env_step_id: Optional[str] = None):
+                 timeout_seconds: int = SIGN_IN_TIMEOUT_SECONDS, env_step_id: Optional[str] = None):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         if not env_id:
             raise ValueError("sign_in_browser needs the env_id of the env whose browser it signs in")
@@ -293,7 +294,7 @@ class SignInBrowserTaskStep(TaskStep):
     def from_dict(cls, data: dict) -> SignInBrowserTaskStep:
         return cls(**cls._base_from_dict(data), env_id=data["env_id"], users=data.get("users"),
                    sites=data.get("sites"), browser=data.get("browser"),
-                   timeout_seconds=data.get("timeout_seconds", 30), env_step_id=data.get("env_step_id"))
+                   timeout_seconds=data.get("timeout_seconds", SIGN_IN_TIMEOUT_SECONDS), env_step_id=data.get("env_step_id"))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         deployed = deployment(context, self.env_id, self.env_step_id, self.id)

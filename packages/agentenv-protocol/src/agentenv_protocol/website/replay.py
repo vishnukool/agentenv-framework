@@ -62,6 +62,8 @@ MAX_CAPTURE_URL_BYTES = 1 << 30
 MAX_CAPTURE_BYTES = 1 << 30
 CAPTURE_READ_CHUNK_BYTES = 1 << 20
 CAPTURE_URL_TIMEOUT_SECONDS = 60
+CAPTURE_MAX_REQUESTS = 500
+CAPTURE_REQUEST_TIMEOUT_SECONDS = 20.0
 DEFAULT_IGNORED_QUERY = ("utm_*", "fbclid", "gclid", "msclkid", "_")
 WARC_VERSION = "WARC/1.1"
 WARC_TYPES = ("application/warc", "application/warc+gzip")
@@ -140,7 +142,7 @@ class Archive:
     @classmethod
     def read(cls, source: str | Path | bytes, ignore_query: Iterable[str] = DEFAULT_IGNORED_QUERY) -> Archive:
         """The answers of a WARC file, gzipped or not, given as its path or its bytes, refused once it expands past
-        ``MAX_CAPTURE_BYTES``."""
+        ``MAX_CAPTURE_BYTES``, or once its answers' bodies, decoded, together do."""
         if isinstance(source, bytes):
             raw = _expanded(io.BytesIO(source))
         else:
@@ -182,6 +184,8 @@ def _records(stream: BinaryIO) -> Iterator[tuple[dict[str, str], bytes]]:
 
 
 def _entries(stream: BinaryIO) -> Iterator[Entry]:
+    """Each answer the WARC holds, its body decoded within what is left of ``MAX_CAPTURE_BYTES`` for all the bodies
+    together, so many small compressed answers can't fill the memory between them."""
     methods: dict[str, str] = {}
     responses = []
     for headers, block in _records(stream):
@@ -192,13 +196,17 @@ def _entries(stream: BinaryIO) -> Iterator[Entry]:
                 methods[headers["warc-concurrent-to"]] = method
         elif kind == "response" and "application/http" in headers.get("content-type", ""):
             responses.append((headers, block))
+    left = MAX_CAPTURE_BYTES
     for headers, block in responses:
-        status, entry_headers, body = _http_response(block)
+        status, entry_headers, body = _http_response(block, left)
+        left -= len(body)
+        if left < 0:
+            raise ValueError(f"the capture's answers are over {MAX_CAPTURE_BYTES} bytes decoded")
         yield Entry(methods.get(headers.get("warc-record-id", ""), "GET"), headers["warc-target-uri"], status,
                     entry_headers, body)
 
 
-def _http_response(block: bytes) -> tuple[int, tuple[tuple[str, str], ...], bytes]:
+def _http_response(block: bytes, limit: int) -> tuple[int, tuple[tuple[str, str], ...], bytes]:
     head, _, body = block.partition(b"\r\n\r\n")
     lines = head.decode("latin-1").split("\r\n")
     status = int(lines[0].split(" ", 2)[1])
@@ -207,16 +215,16 @@ def _http_response(block: bytes) -> tuple[int, tuple[tuple[str, str], ...], byte
     if any(n.lower() == "transfer-encoding" and "chunked" in v.lower() for n, v in headers):
         body = _dechunked(body)
         headers = tuple((n, v) for n, v in headers if n.lower() != "transfer-encoding")
-    return status, *_decoded(headers, body)
+    return status, *_decoded(headers, body, limit)
 
 
 _DECODERS = {"gzip": zlib.MAX_WBITS | 16, "x-gzip": zlib.MAX_WBITS | 16, "deflate": zlib.MAX_WBITS}
 
 
-def _decoded(headers: tuple[tuple[str, str], ...], body: bytes) -> tuple[tuple[tuple[str, str], ...], bytes]:
+def _decoded(headers: tuple[tuple[str, str], ...], body: bytes, limit: int) -> tuple[tuple[tuple[str, str], ...], bytes]:
     """``body`` with its ``Content-Encoding`` undone and that header dropped, as a capture of this module stores it, so
     a page imported from another WARC tool is rewritten too; a coding it can't undo (``br``, say) leaves both as they
-    are, and a body that expands past ``MAX_CAPTURE_BYTES`` is refused."""
+    are, and a body that expands past ``limit`` bytes is refused, decoding no further than that."""
     codings = [c.strip().lower() for n, v in headers if n.lower() == "content-encoding" for c in v.split(",")]
     codings = [c for c in codings if c and c != "identity"]
     if not codings or any(c not in _DECODERS for c in codings):
@@ -224,14 +232,14 @@ def _decoded(headers: tuple[tuple[str, str], ...], body: bytes) -> tuple[tuple[t
     for coding in reversed(codings):
         inflater = zlib.decompressobj(_DECODERS[coding])
         try:
-            expanded = inflater.decompress(body, MAX_CAPTURE_BYTES + 1)
+            expanded = inflater.decompress(body, limit + 1)
         except zlib.error:
             if coding != "deflate":
                 return headers, body
             inflater = zlib.decompressobj(-zlib.MAX_WBITS)
-            expanded = inflater.decompress(body, MAX_CAPTURE_BYTES + 1)
-        if len(expanded) > MAX_CAPTURE_BYTES or inflater.unconsumed_tail:
-            raise ValueError(f"a captured answer is over {MAX_CAPTURE_BYTES} bytes decoded")
+            expanded = inflater.decompress(body, limit + 1)
+        if len(expanded) > limit or inflater.unconsumed_tail:
+            raise ValueError(f"the capture's answers are over {MAX_CAPTURE_BYTES} bytes decoded")
         body = expanded
     return tuple((n, v) for n, v in headers if n.lower() not in ("content-encoding", "content-length")), body
 
@@ -344,9 +352,9 @@ class CaptureResult:
     skipped: int = 0
 
 
-def capture(urls: list[str], out: BinaryIO, *, depth: int = 1, max_requests: int = 500, assets: bool = True,
-            timeout: float = 20.0, client: Any = None, user_agent: str = "agentenv-replay-capture/1",
-            gzipped: bool = True) -> CaptureResult:
+def capture(urls: list[str], out: BinaryIO, *, depth: int = 1, max_requests: int = CAPTURE_MAX_REQUESTS,
+            assets: bool = True, timeout: float = CAPTURE_REQUEST_TIMEOUT_SECONDS, client: Any = None,
+            user_agent: str = "agentenv-replay-capture/1", gzipped: bool = True) -> CaptureResult:
     """Capture ``urls`` and what they lead to into ``out``, a WARC file; ``client`` is an ``httpx.Client`` to fetch
     with instead of one of its own, which must not follow redirects."""
     import httpx
@@ -727,9 +735,11 @@ def main(argv: list[str] | None = None) -> int:
     grab.add_argument("urls", nargs="+", metavar="URL")
     grab.add_argument("--out", required=True, help="the WARC file to write; gzipped unless it ends in .warc")
     grab.add_argument("--depth", type=int, default=1, help="how many links away from a start URL to follow (1)")
-    grab.add_argument("--max-requests", type=int, default=500, help="stop after this many requests (500)")
+    grab.add_argument("--max-requests", type=int, default=CAPTURE_MAX_REQUESTS,
+                      help=f"stop after this many requests ({CAPTURE_MAX_REQUESTS})")
     grab.add_argument("--no-assets", action="store_true", help="capture pages only, not what they load")
-    grab.add_argument("--timeout", type=float, default=20.0, help="seconds one request may take (20)")
+    grab.add_argument("--timeout", type=float, default=CAPTURE_REQUEST_TIMEOUT_SECONDS,
+                      help=f"seconds one request may take ({CAPTURE_REQUEST_TIMEOUT_SECONDS:g})")
     serve = commands.add_parser("serve", help="serve a capture on PORT as a website/v1 site")
     serve.add_argument("capture")
     serve.add_argument("--domain", action="append", default=[], help="a domain the site is declared at")
