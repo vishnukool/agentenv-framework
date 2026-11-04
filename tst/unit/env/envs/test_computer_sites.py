@@ -362,6 +362,33 @@ async def test_the_sites_a_run_deployed_are_read_from_each_gateways_records_and_
 
 
 @pytest.mark.asyncio
+async def test_two_envs_each_serving_a_site_of_one_name_are_routed_apart_and_one_domain_twice_is_still_refused():
+    from agent_env.env.env import DeployedGatewayEnv
+
+    def gateway(env_id, *domains):
+        extension = {"uri": "urn:agentenv:website/v1",
+                     "params": {"domains": list(domains), "browse_url": "/website/notes/"}}
+        card = {"name": env_id, "children_environments": [
+            {"name": "notes", "url": "/svc/notes/agentenv", "capabilities": {"extensions": [extension]}}]}
+        return DeployedGatewayEnv(env_id=env_id, env_version=1, sandbox_id=env_id,
+                                  gateway_url=f"https://{env_id}.example", environment_card=card)
+
+    found = await sites.deployed_sites([gateway("team.a", "notes.test"), gateway("team-b", "notes.example")])
+
+    assert [(s["name"], s["url"], s["domains"]) for s in found] == [
+        ("team-a-notes", "https://team.a.example/website/notes/", ["notes.test"]),
+        ("team-b-notes", "https://team-b.example/website/notes/", ["notes.example"])]
+    table = sites.site_table([Site(**s) for s in found])
+    assert {route.site: route.domains for route in table.routes} == {"team-a-notes": ("notes.test",),
+                                                                      "team-b-notes": ("notes.example",)}
+    assert set(sites.issue(table.routes, valid_for=timedelta(hours=1), label="x").leaves) == {"team-a-notes",
+                                                                                              "team-b-notes"}
+    clash = await sites.deployed_sites([gateway("team-a", "notes.test"), gateway("team-b", "notes.test")])
+    with pytest.raises(sites.SiteConflict, match="'notes.test' \\(team-b-notes\\) overlaps 'notes.test' \\(team-a-notes\\)"):
+        sites.site_table([Site(**s) for s in clash])
+
+
+@pytest.mark.asyncio
 async def test_the_sites_a_run_deployed_are_its_stored_cards_website_children_at_the_routes_the_card_names(
         monkeypatch):
     from agentenv_protocol import client as protocol_v1

@@ -402,7 +402,9 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
     stored card doesn't hold, every site of a record without a card or one whose card the gateway couldn't read when it
     composed its own, is read live at ``/svc/<name>``, and has no names when it serves no card (404 or no JSON).
     Reading one fails otherwise, after ``CARD_ATTEMPTS`` tries, rather than route the site by names it didn't declare.
-    ``only`` keeps the websites of the envs it names, each of which must be deployed."""
+    ``only`` keeps the websites of the envs it names, each of which must be deployed. Sites of different envs that
+    share a name are each named for their env (``_env_qualified``), so they're routed apart, while two that claim one
+    domain are still refused."""
     from agentenv_protocol import client as protocol_v1
     from agentenv_protocol.website import WEBSITE_BROWSE_URL_PARAM, WEBSITE_EXTENSION_URI
 
@@ -415,7 +417,7 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
             raise ValueError(f"site_routing names {', '.join(missing)}, which this run hasn't deployed before the "
                              "computer")
         records = [d for d in records if d.env_id in only]
-    found = []
+    found: list[tuple[str, dict]] = []
     for record in records:
         address = gateway_url_of(record) or getattr(record, "environment_url", None)
         frontends = getattr(record, "website_frontend_urls", None) or {}
@@ -433,12 +435,22 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
                                "isn't routed", child.name, record.env_id)
                 continue
             named.add(service)
-            found.append(_found(child.name, url, params))
+            found.append((record.env_id, _found(child.name, url, params)))
         for name, url in frontends.items():
             if name not in named:
                 card = await _site_card(protocol_v1, f"{gateway_url_of(record)}/svc/{name}", name)
-                found.append(_found(name, url, protocol_v1.extension_params(card, WEBSITE_EXTENSION_URI)))
-    return found
+                found.append((record.env_id, _found(name, url, protocol_v1.extension_params(card, WEBSITE_EXTENSION_URI))))
+    return _env_qualified(found)
+
+
+def _env_qualified(found: list[tuple[str, dict]]) -> list[dict]:
+    """Each site found, a name that sites of different envs share made ``<env_id>-<name>`` for each of them, letters,
+    digits, ``-`` and ``_`` kept, so every site of the run has a name of its own."""
+    envs: dict[str, set[str]] = {}
+    for env_id, site in found:
+        envs.setdefault(site["name"], set()).add(env_id)
+    return [{**site, "name": re.sub(r"[^A-Za-z0-9_-]", "-", f"{env_id}-{site['name']}")}
+            if len(envs[site["name"]]) > 1 else site for env_id, site in found]
 
 
 def _served_as(child) -> str:
