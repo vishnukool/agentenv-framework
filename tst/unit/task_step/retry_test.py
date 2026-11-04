@@ -173,6 +173,7 @@ async def test_retry_rolls_back_span_and_redispatches_on_fresh_world(store):
         "deployed_envs": [{"sandbox_id": "sb-s0-1", "sandbox_type": "fake", "sandbox_ids": {}}],
         "deployed_agents": [],
         "deployed_sandboxes": [],
+        "capturing_envs": [],
     }
     assert [f.get("retried") for f in result.metadata["failed_steps"]] == [True]
 
@@ -773,6 +774,7 @@ def test_rolled_back_sandboxes_is_the_difference_between_stored_and_replayed():
         "deployed_envs": [{"sandbox_id": "sb-e", "sandbox_type": "beta", "sandbox_ids": {"vm": "sb-vm"}}],
         "deployed_agents": [{"sandbox_id": "sb-a", "sandbox_type": "local"}],
         "deployed_sandboxes": [{"sandbox_id": "sb-x", "sandbox_type": None}],
+        "capturing_envs": [],
     }
 
 
