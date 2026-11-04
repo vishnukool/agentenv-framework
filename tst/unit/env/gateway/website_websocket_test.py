@@ -150,12 +150,13 @@ async def test_a_websocket_to_the_sites_data_plane_or_card_is_refused(stack, pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/go", "/go/", "/x/..%2Fgo", "/grading/now", "/agentenv/ext/website/state"])
+@pytest.mark.parametrize("path", ["/grade", "/grade/", "/x/..%2Fgrade", "/grading/now", "/agentenv/ext/website/ready"])
 async def test_a_websocket_to_a_path_the_sites_card_advertises_is_refused(path):
     site = EchoSite()
     card = {"name": "notes", "url": "/agentenv", "capabilities": {"extensions": [{
-        "uri": "urn:agentenv:website/v1", "params": {"state": {"path": "/go"}, "methods": {
-            "state": {"method": "GET", "endpoint": "/agentenv/ext/website/state"}}}},
+        "uri": "urn:agentenv:website/v1", "params": {"methods": {
+            "ready": {"method": "GET", "endpoint": "/agentenv/ext/website/ready"},
+            "grade": {"method": "GET", "endpoint": "/grade"}}}},
         {"uri": "urn:example:grading/v1", "params": {"endpoint": "/grading"}}]}}
     site.app.router.routes.insert(0, Route("/.well-known/agent-env.json", lambda request: JSONResponse(card)))
     site_server, site_port = await serve(site.app)
