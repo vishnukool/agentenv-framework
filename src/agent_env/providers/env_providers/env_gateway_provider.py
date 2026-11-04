@@ -751,8 +751,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         the record: the gateway then believes a role other than ``default`` only beside it, so every caller acting as one
         must send it. Off, as before the key, the role header alone is believed.
 
-        ``capture_traffic`` records every packet each website's server and frontend containers send and receive, with
-        tcpdump in a capture service beside each, as rotating pcap files the gateway serves as traffic/v1, behind a
+        ``capture_traffic`` records every packet each website's server and frontend containers send and receive once
+        its capture attaches, just after the container starts, with tcpdump in a capture service beside each, as rotating pcap files the gateway serves as traffic/v1, behind a
         control token the deploy draws for it and keeps on the record (``control_token``). VM deploys only, since only
         they serve websites; off, the stack is as before it.
         """
@@ -1668,8 +1668,9 @@ def _traffic_capture_service(gateway_image: str, container: str) -> list[str]:
     interface of the container's, its loopback among them, every packet whole and written as it's captured, rotating
     through ``TRAFFIC_CAPTURE_FILES`` files of ``TRAFFIC_CAPTURE_FILE_MB`` million bytes named for the container, its
     oldest overwritten once they're full, so a long run holds at most their product per container on the VM's disk. It joins
-    the container's network namespace, so it sees what the container sends and receives and nothing else, and is the
-    only service given the capabilities a capture needs. It writes to ``TRAFFIC_VOLUME``, which the gateway mounts
+    the container's network namespace, so it sees what the container sends and receives and nothing else, from when it
+    attaches, which is just after the container starts: what a server sends while it starts up can come before it, and
+    isn't recorded. It is the only service given the capabilities a capture needs. It writes to ``TRAFFIC_VOLUME``, which the gateway mounts
     read-only and no website container mounts at all."""
     argv = ["-i", "any", "-n", "-s", "0", "-U", "-Z", "root", "-C", str(TRAFFIC_CAPTURE_FILE_MB),
             "-W", str(TRAFFIC_CAPTURE_FILES), "-w", f"{TRAFFIC_SIDECAR_DIR}/{container}.pcap"]
