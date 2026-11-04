@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import agentenv_protocol.website as website_sdk
-from agentenv_protocol.website import SESSION_PATH, STATE_PATH, WebsiteEnvironment
+from agentenv_protocol.website import SESSION_PATH, WebsiteEnvironment
 from pydantic import BaseModel
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "website_template"
@@ -26,7 +26,7 @@ _CONTEXT_TYPES = {"ToolContext", "Context"}
 _READ_VERBS = ("get", "list", "search", "find", "read", "fetch", "query", "lookup", "show", "count")
 _VERBS = _READ_VERBS + ("create", "add", "new", "update", "edit", "set", "delete", "remove", "send", "post", "put",
                         "patch", "make", "write", "cancel", "book", "submit")
-_BUILTIN_PATHS = {"/api/users", "/api/sign-in", "/healthz", SESSION_PATH, STATE_PATH}
+_BUILTIN_PATHS = {"/api/users", "/api/sign-in", "/healthz", SESSION_PATH}
 _JSON_TYPES = {"string": "str", "integer": "int", "number": "float", "boolean": "bool", "object": "dict",
                "array": "list", "null": "None"}
 _PY_TYPES = {"str": "string", "int": "integer", "float": "number", "bool": "boolean", "dict": "object",
