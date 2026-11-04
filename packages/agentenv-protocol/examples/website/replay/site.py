@@ -1,6 +1,6 @@
 """Widget Docs, replayed: the pages of a captured docs site, served as they were captured for any host, with the
 newsletter sign-up the capture can't answer written as ``@api`` routes on top. The sign-ups are the site's state: the
-data plane exports them, and ``/go`` shows what a run changed."""
+data plane's ``data/get`` exports them."""
 from __future__ import annotations
 
 from pydantic import BaseModel

@@ -62,7 +62,7 @@ When the capture's answers are served:
 ## Synthetic routes on top
 
 `@api` routes win over the capture. Here `POST /api/subscribe` keeps sign-ups in the default store. The data plane
-exports that store, `data/reset` empties it, and `/go` shows a run's changes for the website state verifier. The
+exports that store through `data/get`, which is how a run's sign-ups are read, and `data/reset` empties it. The
 capture itself isn't task state. A `data/add` file part named `*.warc` or `*.warc.gz` (or typed `application/warc`)
 replaces the declared capture until the next `data/reset`. This lets a large capture be loaded at deploy time instead
 of being built into the image.

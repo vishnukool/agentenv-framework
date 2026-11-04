@@ -380,6 +380,12 @@ def test_the_example_serves_its_capture_and_its_sign_up():
     exported = rpc(client, "data/get")["parts"][0]["data"]
     assert [s["email"] for s in exported["subscriptions"]] == ["ann@example.com"]
 
+def test_an_answer_kept_once_still_records_each_host_it_was_captured_from() -> None:
+    archive = Archive([Entry("GET", "https://example.com/", 200, (), b"apex"),
+                       Entry("GET", "https://www.example.com/", 200, (), b"www")])
+    assert archive.find("GET", "/").body == b"apex" and archive.hosts == {"example.com", "www.example.com"}
+
+
 
 def test_an_entry_is_kept_once_per_request():
     archive = Archive([Entry("GET", "https://a.example/x?b=1&a=2", 200, (), b"first"),

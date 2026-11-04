@@ -121,14 +121,15 @@ class Archive:
         return len(self.entries)
 
     def add(self, entry: Entry) -> bool:
-        """Keep ``entry`` unless the archive holds an answer to its request already; whether it was kept."""
+        """Keep ``entry`` unless the archive holds an answer to its request already, recording its host either way, so
+        links to every captured host stay on the replay; whether it was kept."""
         url = urlsplit(entry.url)
+        if url.hostname:
+            self.hosts.add(url.hostname.lower())
         key = request_key(entry.method, url.path, url.query, self.ignore_query)
         if key in self.entries:
             return False
         self.entries[key] = entry
-        if url.hostname:
-            self.hosts.add(url.hostname.lower())
         return True
 
     def find(self, method: str, path: str, query: str = "") -> Optional[Entry]:
