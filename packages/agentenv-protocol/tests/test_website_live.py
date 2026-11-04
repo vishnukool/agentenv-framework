@@ -168,6 +168,9 @@ def test_a_cookie_is_kept_without_its_value_and_given_to_a_browser_in_its_own_sh
     assert Cookie(name="a", value="", domain=".A.example").matches(["a.example"])
     assert Cookie(name="a", value="", domain="sub.a.example").matches(["a.example"])
     assert not Cookie(name="a", value="", domain="nota.example").matches(["a.example"])
+    for domain in ("app.example.com", ".example.com", "deep.app.example.com"):
+        assert Cookie(name="a", value="", domain=domain).matches(["*.example.com"]), domain
+    assert not Cookie(name="a", value="", domain="badexample.com").matches(["*.example.com"])
 
 
 def test_a_website_browser_declares_the_browser_v1_whose_cookies_sign_in_browser_sets():

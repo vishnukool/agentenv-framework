@@ -41,9 +41,12 @@ class Cookie(BaseModel):
 
 
 def domain_matches(domain: str, domains: Iterable[str]) -> bool:
-    """Whether a cookie's ``domain`` is one of ``domains`` or a subdomain of one, leading dots aside."""
+    """Whether a cookie's ``domain`` is one of ``domains`` or a subdomain of one, leading dots aside; a wildcard
+    domain as ``@website`` declares it, ``*.example.com``, covers ``example.com`` and every name under it, since a
+    cookie for ``example.com`` is sent to those names too."""
     host = domain.lstrip(".").lower()
-    return any(host == d or host.endswith("." + d) for d in (d.lstrip(".").lower() for d in domains))
+    bases = (d.lower().removeprefix("*.").lstrip(".") for d in domains)
+    return any(host == d or host.endswith("." + d) for d in bases)
 
 
 def cookies(raw: Any, default_domain: Optional[str] = None) -> list[Cookie]:
