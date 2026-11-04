@@ -7,7 +7,7 @@
 | --- | --- |
 | `site.py` | The server: the `{{class_name}}` WebsiteEnvironment, its `@api` routes and its `@ready_check`, and `serve()` on `PORT` (8000). |
 | `data/seed.json` | The seed data the store starts with: `current_user`, the acting user, the `users` a browser can sign in as, and the site's collections. |
-| `web/` | A minimal Vite app. Its assets (`base: "./"`) and API calls are relative to the page, so it works at `/` and under the gateway's `/website/{{name}}/` alike. `src/site-client.js` is the SDK's browser client: `api()`, `universeNow()`, `followUniverseClock()`, `session()`, `signIn()` and `signOut()`. |
+| `web/` | A minimal Vite app. Its assets (`base: "./"`) and API calls are relative to the page, so it works at `/` and under the gateway's `/website/{{name}}/` alike; opened at a path without its final slash, such as `/website/{{name}}`, the page first reloads itself with it. `src/site-client.js` is the SDK's browser client: `api()`, `universeNow()`, `followUniverseClock()`, `session()`, `signIn()` and `signOut()`. |
 | `Dockerfile` | The server image, built with this folder as its context: Node builds `web/`, then Python installs `agentenv-framework-protocol` with uvicorn. |
 | `env.toml` | The website env as a bundle entry. |
 

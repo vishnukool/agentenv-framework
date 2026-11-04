@@ -90,6 +90,8 @@ def test_a_new_site_has_notes_layout_and_the_sdks_browser_client(tmp_path):
     vite = (site / "web" / "vite.config.js").read_text()
     assert 'base: "./"' in vite and '"/api":' in vite and '"/healthz":' in vite
     assert 'from "./site-client.js"' in (site / "web" / "src" / "main.js").read_text()
+    page = (site / "web" / "index.html").read_text()
+    assert page.index('location.pathname.endsWith("/")') < page.index('<script type="module"')
     for client in ("site-client.js", "site-client.d.ts"):
         assert (site / "web" / "src" / client).read_text() == (CLIENT_DIR / client).read_text()
     assert "{{" not in "".join(p.read_text() for p in site.rglob("*") if p.is_file())
