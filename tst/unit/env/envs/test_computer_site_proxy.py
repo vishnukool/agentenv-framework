@@ -384,7 +384,7 @@ async def test_each_name_is_served_the_certificate_of_its_own_site_and_a_wildcar
             for name in ("notes.test", "chat.test", "eu.chat.test"):
                 reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=ssl.create_default_context(
                     cadata=issued.ca_pem), server_hostname=name)
-                seen[name] = writer.get_extra_info("peercert")["subject"][0][0][1]
+                seen[name] = writer.get_extra_info("peercert")["subjectAltName"][0][1]
                 writer.close()
             with pytest.raises(ssl.SSLCertVerificationError):
                 await asyncio.open_connection("127.0.0.1", port, ssl=ssl.create_default_context(cadata=issued.ca_pem),

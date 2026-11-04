@@ -122,6 +122,17 @@ def test_a_deploys_ca_signs_each_sites_names_and_is_constrained_to_them():
     assert "PRIVATE KEY" in issued.leaves["notes"][1] and "PRIVATE KEY" not in issued.ca_pem
 
 
+def test_a_name_longer_than_a_common_name_takes_is_signed_by_its_alternative_names_alone():
+    now = datetime.now(UTC).replace(microsecond=0)
+    name = f"{'a' * 63}.test"
+    issued = sites.issue(sites.site_table([_site("long", name)]).routes, valid_for=timedelta(hours=1), label="x",
+                         now=now)
+
+    leaf = x509.load_pem_x509_certificate(issued.leaves["long"][0].encode())
+    assert len(leaf.subject) == 0 and leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).critical
+    _verify(issued.ca_pem, issued.leaves["long"][0], name, now)
+
+
 def test_no_ca_is_made_when_no_name_is_served_over_https():
     assert sites.issue(sites.site_table([_site("bare")]).routes, valid_for=timedelta(hours=1), label="x") == \
         sites.Issued(None, {})
