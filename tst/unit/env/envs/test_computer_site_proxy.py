@@ -149,6 +149,22 @@ async def test_a_request_goes_to_the_sites_route_with_the_name_and_scheme_the_br
     assert again[2] == b"hello"
 
 
+@pytest.mark.asyncio
+async def test_the_providers_headers_go_upstream_in_place_of_the_browsers_and_never_back(tmp_path):
+    async with Upstream() as upstream:
+        config, issued = _config(tmp_path, upstream.port)
+        config.sites[0].upstream_headers = {"CF-Access-Client-Secret": "s3cret"}
+        async with _proxy(config) as port:
+            start, headers, body, conn = await _exchange(
+                port, b"GET / HTTP/1.1\r\nHost: notes.test\r\ncf-access-client-secret: forged\r\n\r\n",
+                server_hostname="notes.test", cadata=issued.ca_pem)
+            conn[1].close()
+
+    ((_, sent, _),) = upstream.requests
+    assert sent["cf-access-client-secret"] == "s3cret"
+    assert "s3cret" not in json.dumps(headers) and body == b"hello"
+
+
 async def _serve(app) -> tuple[uvicorn.Server, int]:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
@@ -574,6 +590,35 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
     assert report["trust"]["system"] is None and report["trust"]["nss"] == []
     assert len(report["trust"]["chromium"]) == 4
     assert report["checks"] == {"notes.test": {"status": 200}}
+
+
+def test_install_keeps_the_upstream_headers_in_a_file_root_alone_reads_and_serve_json_names_it(tmp_path, monkeypatch):
+    root, folder = tmp_path / "root", tmp_path / "sites"
+    (root / "etc").mkdir(parents=True)
+    folder.mkdir()
+    folder.chmod(0o700)
+    table = sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/", domains=["notes.test"])])
+    issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
+    given = sites.proxy_config(table, issued, user=None, upstream_headers={"notes": {"CF-Access-Client-Secret": "s3cret"}})
+    (folder / "config.json").write_text(json.dumps(given))
+    started = []
+    monkeypatch.setattr(site_proxy, "start", lambda path, log: started.append(Config.load(path)))
+    monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {})
+    monkeypatch.setattr(site_proxy.shutil, "which", lambda tool: None)
+
+    site_proxy.install(str(folder / "config.json"), site_proxy.Paths(root))
+
+    (config,) = started
+    assert config.sites[0].upstream_headers == {"CF-Access-Client-Secret": "s3cret"}
+    private = folder / site_proxy.UPSTREAM_HEADERS_FILE
+    assert private.stat().st_mode & 0o777 == 0o600 and (folder / "config.json").stat().st_mode & 0o777 == 0o600
+    serving = (folder / "serve.json").read_text()
+    assert "s3cret" not in serving and json.loads(serving)["upstream_headers"] == str(private)
+    private.chmod(0)
+    try:
+        assert Config.load(str(folder / "serve.json")).sites[0].upstream_headers == {}
+    finally:
+        private.chmod(0o600)
 
 
 def test_the_checks_are_given_each_sites_timeout_in_turn(tmp_path, monkeypatch):

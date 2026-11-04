@@ -188,10 +188,30 @@ async def test_route_installs_the_proxy_as_root_with_each_sites_route_as_the_com
     assert site["key_pem"] and config["ca_pem"] == routed["ca"]
     assert sandbox.scripts == ["docker exec -u 0 computer-1 mkdir -p /etc/agentenv/sites",
                                "docker exec -u 0 computer-1 chmod 0700 /etc/agentenv/sites",
+                               "docker exec -u 0 computer-1 chmod 0600 /etc/agentenv/sites/config.json",
                                "docker exec -u 0 computer-1 python3 /etc/agentenv/sites/site_proxy.py install "
                                "/etc/agentenv/sites/config.json"]
+    assert "upstream_headers" not in site
     assert routed["checks"] == _REPORT["checks"] and routed["names"]["routes"] == {"notes": ["notes.test"]}
     assert "PRIVATE KEY" not in json.dumps(routed)
+
+
+@pytest.mark.asyncio
+async def test_the_headers_the_gateways_provider_asks_for_go_in_the_private_config_alone(monkeypatch):
+    from agent_env.providers.sandbox_providers import sandbox_provider
+
+    sandbox = FakeVm(_REPORT)
+    monkeypatch.setattr(sandbox_provider, "sandbox_request_headers_for_url", lambda url: {
+        "CF-Access-Client-Secret": "s3cret"} if url.startswith("http://host.docker.internal:8080/") else {})
+
+    routed = await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
+                               valid_for=timedelta(hours=1), label="desktop")
+
+    (site,) = json.loads(sandbox.written["/etc/agentenv/sites/config.json"])["sites"]
+    assert site["upstream_headers"] == {"CF-Access-Client-Secret": "s3cret"}
+    private = sandbox.events.index("docker exec -u 0 computer-1 chmod 0600 /etc/agentenv/sites/config.json")
+    assert sandbox.events.index(("write", "/etc/agentenv/sites/config.json")) < private < len(sandbox.events) - 1
+    assert "s3cret" not in json.dumps(routed)
 
 
 @pytest.mark.asyncio
@@ -267,6 +287,7 @@ async def test_a_sandbox_that_is_the_container_is_reached_as_root_through_its_ow
     assert calls == [("id", "-u"), ("mkdir", "-p", "/etc/agentenv/sites"), ("chmod", "0700", "/etc/agentenv/sites"),
                      ("mkdir", "-p", "/etc/agentenv/sites"), ("write", "/etc/agentenv/sites/site_proxy.py"),
                      ("mkdir", "-p", "/etc/agentenv/sites"), ("write", "/etc/agentenv/sites/config.json"),
+                     ("chmod", "0600", "/etc/agentenv/sites/config.json"),
                      ("python3", "/etc/agentenv/sites/site_proxy.py", "install", "/etc/agentenv/sites/config.json")]
 
 

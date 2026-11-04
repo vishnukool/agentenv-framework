@@ -259,13 +259,18 @@ def _key_usage(**granted: bool) -> x509.KeyUsage:
     return x509.KeyUsage(**{usage: granted.get(usage, False) for usage in usages})
 
 
-def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str]) -> dict:
-    """What ``site_proxy.py install`` reads: the session user, the CA, and each route with its certificate and key."""
+def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str],
+                 upstream_headers: Optional[dict[str, dict[str, str]]] = None) -> dict:
+    """What ``site_proxy.py install`` reads: the session user, the CA, and each route with its certificate and key, and
+    the headers its gateway's sandbox provider asks requests to it to carry (``upstream_headers``, by site), which the
+    proxy sends upstream alone."""
     sites = []
     for route in table.routes:
         site = {"name": route.site, "upstream": route.url, "domains": list(route.domains)}
         if route.site in issued.leaves:
             site["cert_pem"], site["key_pem"] = issued.leaves[route.site]
+        if (upstream_headers or {}).get(route.site):
+            site["upstream_headers"] = dict(upstream_headers[route.site])
         sites.append(site)
     return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG)}
 
@@ -370,11 +375,15 @@ async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], net
         raise RuntimeError(f"site routing: {problem}")
     if not table.routes:
         return {"names": table.to_dict()}
+    from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
+
     issued = issue(table.routes, valid_for=valid_for, label=label)
+    upstream_headers = {r.site: sandbox_request_headers_for_url(r.url) for r in table.routes}
     channel = RootChannel(sandbox)
     await channel.private_folder(FOLDER)
     await channel.write(PROXY, _PROXY_SOURCE.read_text())
-    await channel.write(CONFIG, json.dumps(proxy_config(table, issued, user=user)))
+    await channel.write(CONFIG, json.dumps(proxy_config(table, issued, user=user, upstream_headers=upstream_headers)))
+    await channel.run(["chmod", "0600", str(CONFIG)])
     output = await channel.run(["python3", str(PROXY), "install", str(CONFIG)])
     report = json.loads(output.strip().splitlines()[-1])
     failed = {name: result for name, result in report["checks"].items() if "error" in result}

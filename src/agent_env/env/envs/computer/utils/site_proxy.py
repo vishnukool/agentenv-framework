@@ -47,6 +47,7 @@ SITE_ROOT_HEADER = "AgentEnv-Site-Root"
 FORWARDED = frozenset({"x-forwarded-host", "x-forwarded-proto", "x-forwarded-for", "x-forwarded-port",
                        "x-forwarded-prefix", "forwarded", SITE_ROOT_HEADER.lower()})
 RESPONSE_DROP = frozenset({"connection", "keep-alive", "proxy-connection", "alt-svc"})
+UPSTREAM_HEADERS_FILE = "upstream_headers.json"
 HEAD_LIMIT = 1 << 20
 CHUNK = 1 << 16
 UPSTREAM_TIMEOUT_S = 30.0
@@ -89,6 +90,7 @@ class Site:
     domains: list[str]
     cert: Optional[str] = None
     key: Optional[str] = None
+    upstream_headers: dict[str, str] = field(default_factory=dict)
     scheme: str = field(init=False)
     host: str = field(init=False)
     port: int = field(init=False)
@@ -127,9 +129,17 @@ class Config:
 
     @classmethod
     def load(cls, path: str) -> Config:
+        """The config at ``path``, with each site's upstream headers from the private file it names, which root alone
+        reads: ``serve`` reads it before it drops privileges, and ``check``, as the session user, goes without."""
         data = json.loads(Path(path).read_text())
+        headers: dict = {}
+        if data.get("upstream_headers"):
+            try:
+                headers = json.loads(Path(data["upstream_headers"]).read_text())
+            except PermissionError:
+                headers = {}
         sites = [Site(name=s["name"], upstream=s["upstream"], domains=list(s["domains"]), cert=s.get("cert"),
-                      key=s.get("key")) for s in data["sites"]]
+                      key=s.get("key"), upstream_headers=dict(headers.get(s["name"]) or {})) for s in data["sites"]]
         return cls(user=data.get("user"), sites=sites, serve_user=data.get("serve_user"),
                    listen=data.get("listen", LOOPBACK),
                    https_port=data.get("https_port", 443), http_port=data.get("http_port", 80),
@@ -217,13 +227,15 @@ def upstream_request(method: str, target: str, headers: list[tuple[str, str]], s
                      host: str, peer: str, upgrade: Optional[str]) -> bytes:
     """The request head sent to the site's route: the path under its prefix, the gateway as ``Host``, the browser's
     name and scheme in ``X-Forwarded-Host`` and ``X-Forwarded-Proto``, ``AgentEnv-Site-Root`` so the site is told it
-    is at ``/``, and a connection that closes after it, or upgrades when the browser asked to."""
+    is at ``/``, the headers the gateway's sandbox provider asks for (``Site.upstream_headers``) in place of any the
+    browser sent by those names, and a connection that closes after it, or upgrades when the browser asked to."""
     if not target.startswith("/"):
         parts = urlsplit(target)
         target = urlunsplit(("", "", parts.path or "/", parts.query, ""))
-    kept = [(key, value) for key, value in headers if key.lower() not in HOP_BY_HOP | FORWARDED]
+    provided = {key.lower() for key in site.upstream_headers}
+    kept = [(key, value) for key, value in headers if key.lower() not in HOP_BY_HOP | FORWARDED | provided]
     kept += [("Host", site.netloc), ("X-Forwarded-Host", host), ("X-Forwarded-Proto", scheme),
-             ("X-Forwarded-For", peer), (SITE_ROOT_HEADER, "1")]
+             ("X-Forwarded-For", peer), (SITE_ROOT_HEADER, "1"), *site.upstream_headers.items()]
     kept += [("Connection", "Upgrade"), ("Upgrade", upgrade)] if upgrade else [("Connection", "close")]
     lines = [f"{method} {site.prefix}{target} HTTP/1.1", *(f"{key}: {value}" for key, value in kept)]
     return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
@@ -762,6 +774,9 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
             write_private(key, site["key_pem"])
             served.update(cert=str(cert), key=str(key))
         sites.append(served)
+    upstream_headers = {site["name"]: site["upstream_headers"] for site in given["sites"] if site.get("upstream_headers")}
+    if upstream_headers:
+        write_private(folder / UPSTREAM_HEADERS_FILE, json.dumps(upstream_headers))
     os.chmod(config_path, 0o600)
     folder.chmod(0o755)
     names = [name for site in given["sites"] for name in site["domains"] if not name.startswith("*.")]
@@ -789,6 +804,8 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
                                                  if key in given}}
     if wildcard:
         serving.update(dns_port=given.get("dns_port", 53), nameservers=nameservers)
+    if upstream_headers:
+        serving["upstream_headers"] = str(folder / UPSTREAM_HEADERS_FILE)
     serve_path = folder / "serve.json"
     serve_path.write_text(json.dumps(serving))
     start(str(serve_path), given.get("log"))
